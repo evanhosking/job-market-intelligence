@@ -3,7 +3,7 @@ from datetime import UTC, datetime, time, timedelta
 from statistics import median
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from market.models import (
     Extraction,
@@ -16,10 +16,17 @@ from market.models import (
     now,
 )
 
-METHOD = "unique-observed-jobs-v1"
+METHOD = "listing-coverage-v2"
 
 
-def cohort(db, qv_id, start=None, end=None, mode="offline", states=("completed",)):
+def listing_eligible():
+    return or_(
+        Run.state == "completed",
+        and_(Run.state == "partial", Run.diagnostics["listing_status"].as_string() == "completed"),
+    )
+
+
+def cohort(db, qv_id, start=None, end=None, mode="offline", states=None):
     qv = db.get(QueryVersion, qv_id)
     tz = ZoneInfo(qv.config["timezone"])
     end = end or datetime.now(tz).date()
@@ -38,7 +45,7 @@ def cohort(db, qv_id, start=None, end=None, mode="offline", states=("completed",
             Observation.observed_at >= left,
             Observation.observed_at < right,
             Run.mode == mode,
-            Run.state.in_(states),
+            Run.state.in_(states) if states else listing_eligible(),
         )
         .order_by(Observation.observed_at, Observation.id)
     ).all()
@@ -51,12 +58,19 @@ def cohort(db, qv_id, start=None, end=None, mode="offline", states=("completed",
     all_obs = db.execute(
         select(Observation.job_id, Observation.observed_at)
         .join(Run, Run.id == Observation.run_id)
-        .where(Observation.query_version_id == qv_id, Run.mode == mode, Run.state == "completed")
+        .where(Observation.query_version_id == qv_id, Run.mode == mode, listing_eligible())
         .order_by(Observation.observed_at)
     ).all()
     for job_id, stamp in reversed(all_obs):
         first[job_id] = stamp
     return list(latest.values()), first, start, end, tz
+
+
+def observation_payload(db, observation, snapshot):
+    run = db.get(Run, observation.run_id)
+    return next(
+        (raw for raw in run.raw_checkpoint if raw.get("id") == snapshot.raw.get("id")), snapshot.raw
+    )
 
 
 def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
@@ -104,7 +118,7 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
             .where(Extraction.snapshot_id == snapshot.id, Extraction.status == "valid")
             .order_by(Extraction.created_at.desc(), Extraction.id.desc())
         )
-        if not extraction:
+        if not extraction or observation_payload(db, observation, snapshot).get("descriptionStale"):
             seniorities["unknown"] += 1
             arrangements["unspecified"] += 1
             continue
@@ -158,7 +172,15 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
                     )
     days = []
     day = start
-    healthy_dates = {r.logical_date for r in runs if r.state == "completed" and r.kind == "daily"}
+    healthy_dates = {
+        r.logical_date
+        for r in runs
+        if (
+            r.state == "completed"
+            or (r.state == "partial" and r.diagnostics.get("listing_status") == "completed")
+        )
+        and (r.kind == "daily" or r.kind.startswith("manual-"))
+    }
     while day <= end:
         key = day.isoformat()
         days.append(
@@ -170,7 +192,12 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
             }
         )
         day += timedelta(days=1)
-    completed = [r for r in runs if r.state == "completed"]
+    completed = [
+        r
+        for r in runs
+        if r.state == "completed"
+        or (r.state == "partial" and r.diagnostics.get("listing_status") == "completed")
+    ]
     latest = completed[0].finished_at if completed else None
     return {
         "meta": {
@@ -185,6 +212,7 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
             "to": end.isoformat(),
             "timezone": str(tz),
             "eligible": eligible,
+            "description_coverage": parsed / eligible if eligible else None,
             "parsed": parsed,
             "extraction_coverage": parsed / eligible if eligible else None,
             "methodology": METHOD,

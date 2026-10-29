@@ -7,14 +7,17 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from linkedin_jobs_cli.client import LinkedInPublicClient
+from linkedin_jobs_cli.client import LinkedInClientError, LinkedInPublicClient
+from linkedin_jobs_cli.models import JobPosting
 from sqlalchemy import select, update
 
 from market.contracts import MonitorConfig
+from market.enrichment import check_source, enrich_jobs
 from market.extraction import ALIASES, clean_description, extract, version
 from market.models import (
     Budget,
     Compensation,
+    DetailTask,
     Extraction,
     Monitor,
     Observation,
@@ -35,6 +38,8 @@ FIXTURE = Path(__file__).resolve().parents[2] / "tests/fixtures/jobs.json"
 
 def enqueue(db, monitor_id, settings, clock=None, kind="daily"):
     clock = clock or datetime.now(UTC)
+    if settings.collection_mode == "live":
+        check_source(db, clock)
     monitor = db.scalar(select(Monitor).where(Monitor.id == monitor_id).with_for_update())
     if not monitor or not monitor.enabled:
         raise ValueError("Monitor not found or disabled")
@@ -152,7 +157,7 @@ def ingest(db, run, rows, settings, clock=None):
                 )
             counts["quarantined"] += 1
             continue
-        if db.scalar(
+        existing_observation = db.scalar(
             select(Observation).where(
                 Observation.run_id == run.id,
                 Observation.job_id.in_(
@@ -161,7 +166,8 @@ def ingest(db, run, rows, settings, clock=None):
                     )
                 ),
             )
-        ):
+        )
+        if existing_observation and not raw.get("descriptionText"):
             continue
         job = db.scalar(
             select(SourceJob).where(
@@ -269,15 +275,18 @@ def ingest(db, run, rows, settings, clock=None):
                     )
                 for pay in extraction.result["compensation"]:
                     db.add(Compensation(extraction_id=extraction.id, disclosure=pay))
-        db.add(
-            Observation(
-                run_id=run.id,
-                query_version_id=run.query_version_id,
-                job_id=job.id,
-                snapshot_id=snapshot.id,
-                observed_at=stamp,
+        if existing_observation:
+            existing_observation.snapshot_id = snapshot.id
+        else:
+            db.add(
+                Observation(
+                    run_id=run.id,
+                    query_version_id=run.query_version_id,
+                    job_id=job.id,
+                    snapshot_id=snapshot.id,
+                    observed_at=stamp,
+                )
             )
-        )
         db.flush()
     return counts
 
@@ -307,18 +316,29 @@ def schedule(db, settings, clock=None):
                         enqueue(db, monitor.id, settings, clock, "weekly")
             except ValueError:
                 logging.warning(
-                    "schedule_skipped monitor_id=%s reason=budget_or_disabled", monitor.id
+                    "schedule_skipped monitor_id=%s reason=source_or_budget_unavailable", monitor.id
                 )
 
 
-def work_once(factory, settings, clock=None):
+def work_once(factory, settings, clock=None, *, allow_live=False):
+    if settings.collection_mode == "live" and not allow_live:
+        raise ValueError("Live execution requires explicit authorization")
     clock = clock or datetime.now(UTC)
     owner = uid()
     with factory.begin() as db:
+        if settings.collection_mode == "live":
+            try:
+                check_source(db, clock)
+            except ValueError:
+                return False
         # Expired uncertain requests are never automatically repeated.
         for expired in db.scalars(
             select(Run)
-            .where(Run.state == "running", Run.lease_until < clock.isoformat())
+            .where(
+                Run.state == "running",
+                Run.lease_until < clock.isoformat(),
+                Run.mode == settings.collection_mode,
+            )
             .with_for_update(skip_locked=True)
         ):
             expired.state, expired.error = (
@@ -327,10 +347,57 @@ def work_once(factory, settings, clock=None):
             )
         run = db.scalar(
             select(Run)
-            .where(Run.state == "queued")
+            .where(Run.state == "queued", Run.mode == settings.collection_mode)
             .order_by(Run.created_at, Run.id)
             .with_for_update(skip_locked=True)
         )
+        if not run and settings.collection_mode == "live":
+            # Drain due missing-description tasks without issuing another search.
+            for prior in db.scalars(
+                select(Run)
+                .where(Run.mode == "live", Run.state == "partial")
+                .order_by(Run.created_at.desc())
+                .limit(20)
+            ):
+                qv = db.get(QueryVersion, prior.query_version_id)
+                monitor = db.get(Monitor, prior.monitor_id)
+                if not monitor.enabled or monitor.current_version != qv.version:
+                    continue
+                ids = [
+                    row.get("id") for row in prior.raw_checkpoint if not row.get("descriptionText")
+                ]
+                due = db.scalar(
+                    select(DetailTask)
+                    .where(
+                        DetailTask.source_job_id.in_(ids),
+                        DetailTask.state.in_(["pending", "retry"]),
+                        DetailTask.attempts < settings.detail_max_attempts,
+                        (
+                            DetailTask.next_attempt_at.is_(None)
+                            | (DetailTask.next_attempt_at <= clock.isoformat())
+                        ),
+                    )
+                    .limit(1)
+                )
+                if due is None:
+                    continue
+                try:
+                    with db.begin_nested():
+                        candidate = enqueue(
+                            db, prior.monitor_id, settings, clock, kind="manual-" + uid()
+                        )
+                        if candidate.id == prior.id or candidate.state != "queued":
+                            continue
+                        candidate.input = {
+                            **candidate.input,
+                            "resume_rows": prior.raw_checkpoint,
+                            "listing_status": prior.diagnostics.get("listing_status", "unknown"),
+                            "capped": prior.diagnostics.get("capped", True),
+                        }
+                        run = candidate
+                except ValueError:
+                    logging.warning("enrichment_skipped reason=budget_exhausted")
+                break
         if not run:
             return False
         run.state, run.lease_owner = "running", owner
@@ -341,6 +408,8 @@ def work_once(factory, settings, clock=None):
             run.kind,
             run.mode,
         )
+    with factory() as db:
+        run_input = db.get(Run, run_id).input
     started = datetime.now(UTC)
 
     def heartbeat():
@@ -355,17 +424,26 @@ def work_once(factory, settings, clock=None):
             if changed.rowcount != 1:
                 raise RuntimeError("Lost collection lease")
 
-    def checkpoint(jobs):
+    def checkpoint_rows(rows):
         heartbeat()
         with factory.begin() as db:
-            db.get(Run, run_id).raw_checkpoint = [job.to_dict() for job in jobs]
+            db.get(Run, run_id).raw_checkpoint = rows
+
+    def checkpoint(jobs):
+        checkpoint_rows([job.to_dict() for job in jobs])
 
     diagnostics: dict[str, Any]
     try:
         if mode == "offline":
             rows, diagnostics = (
                 json.loads(FIXTURE.read_text()),
-                {"demo": True, "requests": 0, "capped": False},
+                {
+                    "demo": True,
+                    "requests": 0,
+                    "capped": False,
+                    "listing_status": "completed",
+                    "enrichment_status": "completed",
+                },
             )
         else:
             with LinkedInPublicClient(
@@ -375,14 +453,44 @@ def work_once(factory, settings, clock=None):
                 heartbeat=heartbeat,
             ) as client:
                 try:
-                    rows = [
-                        j.to_dict()
-                        for j in client.search(
+                    if run_input.get("resume_rows"):
+                        jobs = [
+                            JobPosting(
+                                id=r["id"],
+                                link=r.get("link")
+                                or "https://www.linkedin.com/jobs/view/" + r["id"],
+                                title=r["title"],
+                                company_name=r.get("companyName") or "Unknown",
+                                location=r.get("location") or "Unknown",
+                                posted_at=r.get("postedAt"),
+                                salary_info=r.get("salaryInfo") or [],
+                            )
+                            for r in run_input["resume_rows"]
+                        ]
+                        client.diagnostics.listing_status = run_input.get(
+                            "listing_status", "unknown"
+                        )
+                        client.diagnostics.capped = run_input.get("capped", True)
+                    else:
+                        jobs = client.search(
                             [config.source(kind)],
                             limit_per_source=config.max_items,
                             global_limit=config.max_items,
+                            include_details=False,
                         )
-                    ]
+                    # Commit listing completeness before independently enriching descriptions.
+                    with factory.begin() as db:
+                        db.get(Run, run_id).diagnostics = asdict(client.diagnostics)
+                    listing_rows = [j.to_dict() for j in jobs]
+
+                    def save_enrichment(enriched):
+                        # Preserve unprocessed listing records if the worker exits mid-enrichment.
+                        checkpoint_rows(enriched + listing_rows[len(enriched) :])
+
+                    rows = enrich_jobs(factory, client, jobs, settings, save_enrichment)
+                    client.diagnostics.enrichment_status = (
+                        "partial" if any(r.get("detailError") for r in rows) else "completed"
+                    )
                 finally:
                     with factory.begin() as db:
                         db.get(Run, run_id).diagnostics = asdict(client.diagnostics)
@@ -399,7 +507,9 @@ def work_once(factory, settings, clock=None):
             run.diagnostics = {**diagnostics, **counts}
             run.state = (
                 "partial"
-                if diagnostics.get("detail_failures")
+                if diagnostics.get("listing_status") != "completed"
+                or any(r.get("detailError") for r in rows)
+                or diagnostics.get("detail_failures")
                 or counts["quarantined"]
                 or any(
                     t in diagnostics.get("termination", []) for t in ["repeated_page", "no_new_ids"]
@@ -417,6 +527,29 @@ def work_once(factory, settings, clock=None):
     except Exception as exc:
         with factory.begin() as db:
             run = db.get(Run, run_id)
-            run.state, run.error, run.finished_at = "failed", type(exc).__name__, now()
+            if run.raw_checkpoint:
+                # A later page failure must not discard valid earlier listings.
+                saved_settings = settings.model_copy(update={"llm_mode": "rules"})
+                counts = ingest(db, run, run.raw_checkpoint, saved_settings)
+                run.diagnostics = {
+                    **run.diagnostics,
+                    **counts,
+                    "listing_status": "incomplete",
+                    "enrichment_status": "deferred",
+                }
+            if isinstance(exc, LinkedInClientError) and exc.code in {
+                "access_challenge",
+                "rate_limited",
+            }:
+                from market.enrichment import source_health
+
+                health = source_health(db)
+                health.state = "paused" if exc.code == "access_challenge" else "cooldown"
+                health.reason, health.retry_at, health.updated_at = exc.code, exc.retry_at, now()
+            run.state, run.error, run.finished_at = (
+                "partial" if run.raw_checkpoint else "failed",
+                getattr(exc, "code", type(exc).__name__),
+                now(),
+            )
             logging.error("collection_failed run_id=%s error_type=%s", run_id, type(exc).__name__)
     return True

@@ -50,3 +50,13 @@ Run PostgreSQL CI, visually inspect desktop/mobile UI, then perform one explicit
 - Fresh SQLite Alembic upgrade, downgrade and re-upgrade succeeded; Alembic check reports no schema drift.
 - Fixture replay twice produced zero additional extractions on the second replay. The offline smoke test asserts stable job, snapshot, observation, extraction and metric counts.
 - Running API readiness returned `{"status":"ready"}`. Live LinkedIn and paid LLM requests were not made. The browser service was unavailable/timed out, so rendered visual and interaction QA is unverified.
+
+## Guest worker improvements after live use
+
+Implemented structural challenge classification, typed failure reasons, Retry-After cooldowns, persistent source pauses and per-job detail tasks. A usable public job response with an embedded sign-in form is accepted; confirmed access denial pauses the guest source. No LinkedIn account credentials, browser sessions or OAuth integration were added.
+
+Listing completeness and enrichment coverage are independent. Successful bounded listing stages can support observed-volume/title metrics while missing descriptions remain excluded from description-based denominators. Unknown/incomplete listing stages still produce trend gaps. Saved partial listings survive later page failures. Cached descriptions retain their retrieval date and stale descriptions survive failures without being promoted into fresh requirement metrics. Missing details resume from saved IDs within budgets; the worker can drain due tasks without repeating searches. Live and offline queue entries are isolated and live execution requires explicit authorization.
+
+Migration 0002 was applied to the live SQLite database after a backup and verified with upgrade/downgrade/re-upgrade on a disposable database. Tests cover the source failure paths and 47 tests passed, with the PostgreSQL test skipped locally; backend lint, formatting and mypy and frontend typecheck/lint/format/build passed. The sibling CLI's 11 tests also passed. Browser visual inspection remains unavailable in this environment.
+
+The requested post-change live refresh completed a bounded sample of 50 distinct valid listings (string source ID, title, company and canonical LinkedIn job URL checked). Eleven descriptions were available from retrieval/cache. The listing stage completed and is visible in dashboard listing metrics; enrichment remains partial because LinkedIn returned HTTP 429. The worker stopped at the rate limit and retained the cooldown; it did not log in or bypass the restriction. An earlier 100-item attempt saved 50 listings before a sixth-page rate limit; those checkpoint records were recovered without claiming search completeness.

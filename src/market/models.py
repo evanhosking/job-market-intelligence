@@ -183,3 +183,23 @@ class Insight(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
     metric_id: Mapped[str] = mapped_column(ForeignKey("metric_snapshots.id"))
     content: Mapped[dict] = mapped_column(Json)
+
+
+class SourceHealth(Base):
+    __tablename__ = "source_health"
+    source: Mapped[str] = mapped_column(String, primary_key=True)
+    state: Mapped[str] = mapped_column(String, default="available")
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    retry_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String, default=now)
+
+
+class DetailTask(Base):
+    __tablename__ = "detail_tasks"
+    source_job_id: Mapped[str] = mapped_column(String, primary_key=True)
+    state: Mapped[str] = mapped_column(String, default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    payload: Mapped[dict] = mapped_column(Json, default=dict)
+    fetched_at: Mapped[str | None] = mapped_column(String, nullable=True)

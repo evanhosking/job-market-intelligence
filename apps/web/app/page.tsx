@@ -17,6 +17,12 @@ type Monitor = {
   distance: number | null;
 };
 type Meta = {
+  source_health: {
+    state: string;
+    reason: string | null;
+    retry_at: string | null;
+    auth_mode: string;
+  };
   collected_jobs: number;
   collected_parsed: number;
   partial_only_jobs: number;
@@ -57,6 +63,8 @@ type Skill = {
   examples: { job_id: string; quote: string }[];
 };
 type Job = {
+  description_cached: boolean;
+  description_fetched_at: string | null;
   collection_state: string;
   description_available: boolean;
   detail_error: string | null;
@@ -582,13 +590,25 @@ export default function Dashboard() {
               <div className="quality">
                 {meta.stale ? "No recent complete collection. " : ""}
                 {meta.incomplete_runs > 0
-                  ? `${meta.incomplete_runs} incomplete run(s) excluded from metrics. `
+                  ? `${meta.incomplete_runs} run(s) have incomplete collection or description coverage. `
                   : ""}
                 {meta.capped
                   ? "A result cap was reached; this sample may be truncated."
                   : ""}
               </div>
             )}
+            {meta.source_health?.state !== "available" &&
+              meta.source_health && (
+                <div className="quality" role="status">
+                  Source access unavailable: {meta.source_health.reason}. Guest
+                  collection is paused.
+                  {meta.source_health.retry_at
+                    ? ` Next eligible attempt: ${date(meta.source_health.retry_at)}.`
+                    : " Review source access before explicitly resuming the worker."}{" "}
+                  Saved jobs remain available. No account credentials are
+                  stored.
+                </div>
+              )}
             {meta.partial_only_jobs > 0 && (
               <div className="quality" role="status">
                 {meta.collected_jobs} jobs collected; {meta.collected_parsed}{" "}
@@ -827,6 +847,12 @@ export default function Dashboard() {
                               {j.title}
                             </a>
                             <small>{j.company}</small>
+                            {j.description_cached && (
+                              <small>
+                                Cached description · retrieved{" "}
+                                {date(j.description_fetched_at)}
+                              </small>
+                            )}
                             {j.collection_state === "partial" && (
                               <span className="tag">Partial collection</span>
                             )}

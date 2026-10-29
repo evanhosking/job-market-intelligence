@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 
 from market.contracts import JobExtraction, Pay, Requirement
 
-RULE_VERSION = "rules-v1:prompt-v1:curated-v1"
+RULE_VERSION = "rules-v2:prompt-v1:curated-v1"
 ALIASES = {
     "C#": ["C#", "C Sharp"],
     ".NET": [".NET"],
@@ -107,7 +107,10 @@ def rules(raw, text):
         lc = clause.lower()
         context = (
             "candidate_requirement"
-            if re.search(r"required|experience|grasp|familiarity|ideally|must|preferred", lc)
+            if re.search(
+                r"requir(?:e(?:d|s)?|ements?)|experience|grasp|familiarity|ideally|must|preferred",
+                lc,
+            )
             else "current_stack"
             if "stack" in lc
             else "other"
@@ -118,7 +121,7 @@ def rules(raw, text):
             else "familiarity"
             if "familiar" in lc
             else "required"
-            if re.search(r"required|must|strong grasp", lc)
+            if re.search(r"requir(?:e(?:d|s)?|ements?)|must|strong grasp", lc)
             else "unclear"
         )
         group = f"alternative-{i}" if re.search(r"\bor\b|or similar", lc) else None

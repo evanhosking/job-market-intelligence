@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import random
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import httpx
+from bs4 import BeautifulSoup
 
 from linkedin_jobs_cli.models import JobPosting, SearchSource
 from linkedin_jobs_cli.parser import enrich_job_from_detail, parse_search_results
-
 
 SEARCH_ENDPOINT = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 DETAIL_ENDPOINT = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
@@ -22,7 +26,23 @@ DEFAULT_USER_AGENT = (
 
 
 class LinkedInClientError(RuntimeError):
-    pass
+    def __init__(self, message, *, code="integration_error", retry_at=None):
+        super().__init__(message)
+        self.code = code
+        self.retry_at = retry_at
+
+
+def retry_time(value, clock=None):
+    clock = clock or datetime.now(UTC)
+    try:
+        target = (
+            clock + timedelta(seconds=int(value))
+            if value.strip().isdigit()
+            else parsedate_to_datetime(value)
+        )
+        return max(clock, target.astimezone(UTC))
+    except (ValueError, TypeError, OverflowError):
+        return clock + timedelta(seconds=60)
 
 
 @dataclass
@@ -32,6 +52,10 @@ class CollectionDiagnostics:
     detail_failures: int = 0
     capped: bool = False
     termination: list[str] = field(default_factory=list)
+    listing_status: str = "pending"
+    enrichment_status: str = "pending"
+    access_paused: bool = False
+    responses: list[dict] = field(default_factory=list)
 
 
 ProgressCallback = Callable[[str], None]
@@ -65,7 +89,7 @@ class LinkedInPublicClient:
         self._last_request_at: float | None = None
         self._client = httpx.Client(
             timeout=timeout,
-            follow_redirects=True,
+            follow_redirects=False,
             transport=transport,
             headers={
                 "Accept": "text/html,application/xhtml+xml",
@@ -87,55 +111,113 @@ class LinkedInPublicClient:
     def _pause(self) -> None:
         if self.delay <= 0 or self._last_request_at is None:
             return
-        target = self.delay * random.uniform(0.85, 1.15)
+        target = self.delay * random.uniform(1, 1.15)
         remaining = target - (time.monotonic() - self._last_request_at)
         if remaining > 0:
             time.sleep(remaining)
 
     def _get(self, url: str, *, params: dict[str, str] | None = None) -> str:
-        last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
-            self.heartbeat()
-            if self.diagnostics.requests >= self.max_requests:
-                raise LinkedInClientError("Request budget exhausted")
-            self._pause()
-            self.diagnostics.requests += 1
-            try:
-                response = self._client.get(url, params=params)
-                self._last_request_at = time.monotonic()
-            except httpx.RequestError as error:
-                self._last_request_at = time.monotonic()
-                last_error = error
-                if attempt == self.max_retries:
+            current_url = url
+            for redirect in range(6):
+                self.heartbeat()
+                if self.diagnostics.requests >= self.max_requests:
+                    raise LinkedInClientError("Request budget exhausted", code="budget_exhausted")
+                self._pause()
+                self.diagnostics.requests += 1
+                try:
+                    response = self._client.get(
+                        current_url, params=params if redirect == 0 else None
+                    )
+                except httpx.RequestError:
+                    self._last_request_at = time.monotonic()
+                    if attempt == self.max_retries:
+                        raise LinkedInClientError(
+                            "Network request failed", code="transient"
+                        ) from None
+                    time.sleep(min(2**attempt, 8))
                     break
-                time.sleep(min(2**attempt, 8))
-                continue
+                self._last_request_at = time.monotonic()
+                path = urlsplit(str(response.url)).path
+                soup = BeautifulSoup(response.text, "html.parser")
+                has_description = bool(soup.select_one(".show-more-less-html__markup"))
+                has_cards = bool(soup.select_one(".job-search-card"))
+                diagnostic = {
+                    "status": response.status_code,
+                    "path": path[:200],
+                    "bytes": len(response.content),
+                    "sha256": hashlib.sha256(response.content).hexdigest(),
+                    "has_description": has_description,
+                    "has_cards": has_cards,
+                }
+                self.diagnostics.responses = (self.diagnostics.responses + [diagnostic])[-30:]
+                if response.is_redirect:
+                    destination = urljoin(str(response.url), response.headers.get("location", ""))
+                    parsed = urlsplit(destination)
+                    if any(
+                        marker in parsed.path.lower()
+                        for marker in ("/authwall", "/checkpoint", "/login", "/uas/")
+                    ):
+                        raise LinkedInClientError(
+                            "LinkedIn redirected to an access challenge", code="access_challenge"
+                        )
+                    if (
+                        parsed.scheme != "https"
+                        or parsed.hostname not in {"linkedin.com", "www.linkedin.com"}
+                        or redirect == 5
+                    ):
+                        raise LinkedInClientError("Unsupported redirect", code="redirect_error")
+                    current_url = destination
+                    continue
+                if response.status_code == 429:
+                    target = retry_time(response.headers.get("Retry-After", ""))
+                    raise LinkedInClientError(
+                        "LinkedIn rate limited this request",
+                        code="rate_limited",
+                        retry_at=target.isoformat(),
+                    )
+                if response.status_code in {401, 403, 999}:
+                    raise LinkedInClientError(
+                        "LinkedIn denied guest access", code="access_challenge"
+                    )
+                if response.status_code >= 500:
+                    if attempt == self.max_retries:
+                        raise LinkedInClientError(
+                            "LinkedIn temporary server error", code="transient"
+                        )
+                    time.sleep(min(2 ** (attempt + 1), 8))
+                    break
+                if response.status_code == 404:
+                    raise LinkedInClientError(
+                        "LinkedIn job posting was not found", code="not_found"
+                    )
+                if response.status_code >= 400:
+                    raise LinkedInClientError("LinkedIn rejected the request", code="http_error")
+                lowered = response.text.lower()
+                challenge = (
+                    soup.select_one('input[name="session_key"], #authwall')
+                    or "<title>security verification" in lowered
+                )
+                # A sign-in widget does not invalidate a genuine public job response.
+                if challenge and not has_description and not has_cards:
+                    raise LinkedInClientError(
+                        "LinkedIn returned an access challenge", code="access_challenge"
+                    )
+                return response.text
+        raise LinkedInClientError("Transient request failure", code="transient")
 
-            if response.status_code == 429:
-                if attempt == self.max_retries:
-                    raise LinkedInClientError("LinkedIn rate-limited the public search request (HTTP 429)")
-                retry_after = response.headers.get("Retry-After", "")
-                wait = min(float(retry_after), 30) if retry_after.isdigit() else min(2 ** (attempt + 1), 8)
-                time.sleep(wait)
-                continue
-            if response.status_code >= 500:
-                if attempt == self.max_retries:
-                    raise LinkedInClientError(f"LinkedIn returned HTTP {response.status_code}")
-                time.sleep(min(2 ** (attempt + 1), 8))
-                continue
-            if response.status_code == 404:
-                raise LinkedInClientError("LinkedIn job posting was not found (HTTP 404)")
-            if response.status_code >= 400:
-                raise LinkedInClientError(f"LinkedIn returned HTTP {response.status_code}")
-            if any(marker in str(response.url).lower() for marker in ("/authwall", "/checkpoint", "/login")):
-                raise LinkedInClientError("LinkedIn redirected to an access challenge")
-            text = response.text
-            lowered = text.lower()
-            if any(marker in lowered for marker in ('name="session_key"', 'id="authwall', '<title>security verification')):
-                raise LinkedInClientError("LinkedIn returned an access challenge")
-            return text
-
-        raise LinkedInClientError(f"Could not reach LinkedIn: {last_error}")
+    def fetch_detail(self, job: JobPosting) -> JobPosting:
+        try:
+            html = self._get(DETAIL_ENDPOINT.format(job_id=job.id))
+            enrich_job_from_detail(job, html)
+            if not job.description_text:
+                raise LinkedInClientError("Detail page has no description", code="schema_drift")
+        except LinkedInClientError as error:
+            job.detail_scraped = False
+            job.detail_error = error.code
+            self.diagnostics.detail_failures += 1
+            raise
+        return job
 
     def search(
         self,
@@ -168,8 +250,18 @@ class LinkedInPublicClient:
                 self.diagnostics.pages += 1
                 page = parse_search_results(html, source_url=source.original_url or source.label)
                 if not page:
-                    if html.strip() and not any(marker in html.lower() for marker in ("no-results", "no jobs found", "no matching jobs", "no results found")):
-                        raise LinkedInClientError("Unrecognized nonempty search response; possible schema drift or challenge")
+                    if html.strip() and not any(
+                        marker in html.lower()
+                        for marker in (
+                            "no-results",
+                            "no jobs found",
+                            "no matching jobs",
+                            "no results found",
+                        )
+                    ):
+                        raise LinkedInClientError(
+                            "Unrecognized nonempty search response; possible schema drift or challenge"
+                        )
                     self.diagnostics.termination.append("empty_page")
                     break
 
@@ -198,22 +290,25 @@ class LinkedInPublicClient:
                     break
                 offset += PAGE_SIZE
 
-            if source_count >= limit_per_source or (global_limit is not None and len(collected) >= global_limit):
+            if source_count >= limit_per_source or (
+                global_limit is not None and len(collected) >= global_limit
+            ):
                 self.diagnostics.capped = True
             if global_limit is not None and len(collected) >= global_limit:
                 break
 
+        self.diagnostics.listing_status = "completed"
+        self.diagnostics.enrichment_status = "not_requested"
         if include_details:
-            for index, job in enumerate(collected, start=1):
-                self.progress(f"Fetching details {index}/{len(collected)} for job {job.id}")
+            self.diagnostics.enrichment_status = "completed"
+            for job in collected:
                 try:
-                    html = self._get(DETAIL_ENDPOINT.format(job_id=job.id))
-                    enrich_job_from_detail(job, html)
-                    if not job.description_text:
-                        raise LinkedInClientError("Detail page has no description; possible schema drift")
+                    self.fetch_detail(job)
                 except LinkedInClientError as error:
-                    job.detail_error = str(error)
-                    self.diagnostics.detail_failures += 1
+                    self.diagnostics.enrichment_status = "partial"
+                    if error.code in {"access_challenge", "rate_limited", "budget_exhausted"}:
+                        self.diagnostics.access_paused = error.code == "access_challenge"
+                        self.checkpoint(collected)
+                        break
                 self.checkpoint(collected)
-
         return collected

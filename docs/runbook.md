@@ -46,3 +46,13 @@ Raw retention target is 90 days, but pruning automation is deferred. Back up che
 The API loads `.env` only at process startup. Restart it after changing DATABASE_URL or COLLECTION_MODE; a worker launched later may already be using live settings while an older API still serves the demo database. On reload the dashboard selects an available monitor if the previous database's monitor ID is no longer present.
 
 The Jobs explorer includes saved observations from completed and partial runs. Listings identify partial collection and missing descriptions; overview metadata reports collected_jobs, collected_parsed and partial_only_jobs. Trend metrics still use only completed runs. For example, a run may save 25 listing records but retrieve only six descriptions because LinkedIn returned access challenges on 19 detail requests. Those 25 jobs should be inspectable, while the run remains partial and its daily trend is missing. Do not mark a partial run complete merely to populate charts.
+
+## Guest worker version 2
+
+Migration 0002 adds source health and durable per-job description tasks. Apply with `uv run alembic upgrade head` before API/worker startup. No existing jobs, snapshots or observations are deleted. Downgrade 0002 drops only the source-health/cache-task tables, so successful description snapshots remain. Back up before any migration.
+
+Challenge detection considers valid job content before treating an embedded sign-in form as a challenge. Confirmed challenge redirects, 401/403/999 responses or challenge-only pages pause live collection until explicit operator review/resume. Rate limits automatically release after the full Retry-After delay. The worker does not store member account credentials.
+
+New runs record listing_status and enrichment_status separately. Saved listing checkpoints are ingested even if a later search page fails; such searches remain incomplete and do not become healthy zero days. Fresh cached descriptions carry their retrieval date. Old descriptions survive a failed refresh but stale ones are excluded from requirement metrics.
+
+A continuous live worker drains due missing-description tasks with a new, separately budgeted recovery run. It reuses saved listing IDs, refreshes only missing/stale descriptions, and never changes a previously incomplete search to complete. Missing detail retries have a finite attempt cap; not-found and parser drift stop automatic attempts. If a challenge is confirmed use `market source-resume --live` only after reviewing the diagnostic classification. CLI `market refresh --live --limit 50` queues an explicit manual collection; `market retry-details --live --run-id ID --limit 50` queues saved-listing recovery.

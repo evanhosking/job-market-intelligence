@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     web_origin: str = "http://localhost:3000"
     collection_mode: Literal["offline", "live"] = "offline"
     monthly_item_cap: int = Field(default=3000, ge=1, le=100000)
+    detail_cache_hours: int = Field(default=72, ge=1, le=720)
+    detail_max_attempts: int = Field(default=3, ge=1, le=5)
     request_cap: int = Field(default=250, ge=1, le=1000)
     llm_monthly_request_cap: int = Field(default=100, ge=0, le=10000)
     llm_mode: Literal["rules", "live"] = "rules"

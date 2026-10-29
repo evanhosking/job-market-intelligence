@@ -59,7 +59,7 @@ No LinkedIn login, cookie, proxy or provider token is required. The worker impor
 uv run linkedin-jobs search 'software engineer' --location 'United Kingdom' --limit 10 --format json
 ```
 
-A run saves immutable effective search parameters. Daily date window is `past24Hours`; Sunday's separately budgeted overlap uses `pastWeek`, including for URL searches. Keyword/location filters are ignored in URL mode. Start with 25 items per run. Public search may be incomplete, blocked or differently ranked. Access challenges, unrecognized markup, repeated pages and detail errors are surfaced; partial runs are excluded from metrics.
+A run saves immutable effective search parameters. Daily date window is `past24Hours`; Sunday's separately budgeted overlap uses `pastWeek`, including for URL searches. Keyword/location filters are ignored in URL mode. Start with 25 items per run. Public search may be incomplete, blocked or differently ranked. Access challenges, unrecognized markup, repeated pages and detail errors are surfaced. Listing completeness and description coverage are independent: a complete bounded listing phase can support observed-volume/title metrics even when descriptions are partial. An interrupted listing phase remains excluded.
 
 Conservative limits: 1–100 jobs per run, `MONTHLY_ITEM_CAP=3000` reserved items across monitors, `REQUEST_CAP=250` HTTP attempts per run including retries, 1.5-second request delay and a 20-minute collection deadline. Reservations remain consumed after failures because usage may be uncertain. There is no Apify scraping bill; these controls bound workload, not infrastructure charges.
 
@@ -94,3 +94,19 @@ The tests use temporary SQLite databases and HTTP fakes, never LinkedIn or a pai
 - [API contract](docs/api.md)
 
 The new repository is local; no GitHub remote, public deployment or live scrape was created.
+
+## Guest source health and description recovery
+
+Apply the new migration before restarting API/worker: `uv run alembic upgrade head`. The worker remains guest-only and never stores LinkedIn passwords, session cookies or OAuth tokens. A sign-in widget embedded in an otherwise usable public job page no longer causes a false challenge. HTTP diagnostics retain only response status, path, byte count, content hash and job-content flags, never response headers or challenge bodies.
+
+Confirmed access challenges pause the source; 429 responses defer requests until Retry-After (HTTP-date or seconds). A continuous live worker resumes due missing-description tasks after cooldown without repeating search pages, within monthly and per-run budgets and at most DETAIL_MAX_ATTEMPTS attempts per job. Permanent not-found/schema failures require review. Fresh descriptions are reused for DETAIL_CACHE_HOURS (default 72). Failed refreshes preserve older descriptions, mark them stale, and exclude stale descriptions from requirement metrics.
+
+```sh
+uv run market refresh --live --limit 50
+uv run market worker --live --once
+uv run market retry-details --live --run-id RUN_ID --limit 50
+```
+
+`refresh` explicitly queues a separate manual run and creates a new immutable query version if the requested cap changes. `retry-details` creates a bounded recovery run from saved listings, retaining the original listing completeness. Neither command itself issues network requests. The live worker requires both live configuration and `--live`, and can only claim live queue entries; offline workers cannot execute live work.
+
+For a confirmed challenge, inspect source diagnostics first. An operator can explicitly re-enable guest collection with `uv run market source-resume --live`; this does not log in, solve a challenge or bypass access controls. The dashboard and `/api/v1/source-health` report available, cooldown or paused state. Existing jobs remain inspectable during a pause.

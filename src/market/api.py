@@ -8,11 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
-from market.analytics import cohort, compute
+from market.analytics import cohort, compute, observation_payload
 from market.config import Settings
 from market.contracts import MonitorConfig
 from market.db import Session
-from market.models import Extraction, Monitor, QueryVersion, Run, Snapshot, SourceJob
+from market.models import Extraction, Monitor, QueryVersion, Run, Snapshot, SourceHealth, SourceJob
 from market.pipeline import enqueue
 
 
@@ -72,11 +72,25 @@ def create_app(factory=Session, settings=None):
     @app.get("/api/v1/health/ready")
     def ready(db=Depends(session)):
         try:
-            if db.scalar(text("SELECT version_num FROM alembic_version")) != "0001":
+            if db.scalar(text("SELECT version_num FROM alembic_version")) != "0002":
                 raise ValueError("Migration revision is not current")
         except Exception:
             raise HTTPException(503, "Database unavailable or migrations missing")
         return {"status": "ready"}
+
+    def health_data(db):
+        health = db.get(SourceHealth, "linkedin") if settings.collection_mode == "live" else None
+        return {
+            "source": "linkedin",
+            "auth_mode": "guest",
+            "state": health.state if health else "available",
+            "reason": health.reason if health else None,
+            "retry_at": health.retry_at if health else None,
+        }
+
+    @app.get("/api/v1/source-health", dependencies=[Depends(auth)])
+    def get_source_health(db=Depends(session)):
+        return health_data(db)
 
     @app.get("/api/v1/monitors", dependencies=[Depends(auth)])
     def monitors(db=Depends(session)):
@@ -192,7 +206,15 @@ def create_app(factory=Session, settings=None):
                     "posted_at": j.posted_at,
                     "collection_state": db.get(Run, observation.run_id).state,
                     "description_available": bool(snapshot.description),
-                    "detail_error": snapshot.raw.get("detailError"),
+                    "description_cached": bool(
+                        observation_payload(db, observation, snapshot).get("descriptionCached")
+                    ),
+                    "description_fetched_at": observation_payload(db, observation, snapshot).get(
+                        "descriptionFetchedAt"
+                    ),
+                    "detail_error": observation_payload(db, observation, snapshot).get(
+                        "detailError"
+                    ),
                 }
                 for observation, j, snapshot in page
             ],
@@ -245,7 +267,7 @@ def create_app(factory=Session, settings=None):
         data = result[view]
         if view == "salaries" and currency:
             data["groups"] = [g for g in data["groups"] if g["currency"] == currency]
-        return {"data": data, "meta": result["meta"]}
+        return {"data": data, "meta": {**result["meta"], "source_health": health_data(db)}}
 
     return app
 
