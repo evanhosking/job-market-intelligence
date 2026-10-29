@@ -17,6 +17,10 @@ type Monitor = {
   distance: number | null;
 };
 type Meta = {
+  collected_jobs: number;
+  collected_parsed: number;
+  partial_only_jobs: number;
+  latest_collection_at: string | null;
   demo: boolean;
   eligible: number;
   parsed: number;
@@ -53,6 +57,9 @@ type Skill = {
   examples: { job_id: string; quote: string }[];
 };
 type Job = {
+  collection_state: string;
+  description_available: boolean;
+  detail_error: string | null;
   id: string;
   title: string;
   company: string;
@@ -173,9 +180,11 @@ export default function Dashboard() {
       const m = await request("/monitors");
       if (sequence !== loadSequence.current) return;
       setMonitors(m.data);
-      const id = mid || m.data[0]?.id;
+      const id = m.data.some((monitor: Monitor) => monitor.id === mid)
+        ? mid
+        : m.data[0]?.id;
       if (!id) return;
-      if (!mid) setMid(id);
+      if (mid !== id) setMid(id);
       const end = new Date();
       const start = new Date(end);
       start.setDate(start.getDate() - Number(days) + 1);
@@ -413,9 +422,11 @@ export default function Dashboard() {
             </select>
           </label>
           <div className="freshness">
-            Data as of
+            Latest collection
             <br />
-            <strong>{date(meta?.data_as_of || null)}</strong>
+            <strong>
+              {date(meta?.latest_collection_at || meta?.data_as_of || null)}
+            </strong>
           </div>
         </div>
         {error && (
@@ -569,7 +580,7 @@ export default function Dashboard() {
           <>
             {(meta.stale || meta.incomplete_runs > 0 || meta.capped) && (
               <div className="quality">
-                {meta.stale ? "Collection is stale. " : ""}
+                {meta.stale ? "No recent complete collection. " : ""}
                 {meta.incomplete_runs > 0
                   ? `${meta.incomplete_runs} incomplete run(s) excluded from metrics. `
                   : ""}
@@ -578,11 +589,22 @@ export default function Dashboard() {
                   : ""}
               </div>
             )}
+            {meta.partial_only_jobs > 0 && (
+              <div className="quality" role="status">
+                {meta.collected_jobs} jobs collected; {meta.collected_parsed}{" "}
+                descriptions parsed. {meta.partial_only_jobs} jobs are available
+                only from partial collections and are excluded from trends.{" "}
+                <button className="textbutton" onClick={() => setTab("Jobs")}>
+                  Inspect collected jobs
+                </button>
+              </div>
+            )}
             {tab === "Overview" && overview && (
               <>
                 <div className="summary">
                   <p>
-                    <strong>{overview.jobs}</strong> unique jobs observed
+                    <strong>{overview.jobs}</strong> unique jobs eligible for
+                    trends
                   </p>
                   <p>
                     <strong>
@@ -762,6 +784,11 @@ export default function Dashboard() {
             {tab === "Jobs" && (
               <section>
                 <h2>Jobs explorer</h2>
+                <p>
+                  Saved listings include partial collections. Missing
+                  descriptions and incomplete collection states are labelled
+                  below.
+                </p>
                 <form
                   className="search"
                   onSubmit={(e) => {
@@ -800,6 +827,9 @@ export default function Dashboard() {
                               {j.title}
                             </a>
                             <small>{j.company}</small>
+                            {j.collection_state === "partial" && (
+                              <span className="tag">Partial collection</span>
+                            )}
                           </td>
                           <td>{j.location}</td>
                           <td>{j.posted_at || "Unknown"}</td>
@@ -808,7 +838,9 @@ export default function Dashboard() {
                               className="textbutton"
                               onClick={() => openJob(j.id)}
                             >
-                              View description
+                              {j.description_available
+                                ? "View description"
+                                : "Description unavailable"}
                             </button>
                           </td>
                         </tr>
@@ -827,7 +859,10 @@ export default function Dashboard() {
                 {detail && (
                   <article className="evidence">
                     <h3>Source description</h3>
-                    <p className="description">{detail.description}</p>
+                    <p className="description">
+                      {detail.description ||
+                        "LinkedIn did not provide a description for this listing. Its listing details were saved, but its requirements could not be extracted."}
+                    </p>
                     <details open>
                       <summary>Validated extraction and evidence</summary>
                       <pre>{JSON.stringify(detail.extraction, null, 2)}</pre>

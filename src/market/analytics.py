@@ -19,7 +19,7 @@ from market.models import (
 METHOD = "unique-observed-jobs-v1"
 
 
-def cohort(db, qv_id, start=None, end=None, mode="offline"):
+def cohort(db, qv_id, start=None, end=None, mode="offline", states=("completed",)):
     qv = db.get(QueryVersion, qv_id)
     tz = ZoneInfo(qv.config["timezone"])
     end = end or datetime.now(tz).date()
@@ -38,7 +38,7 @@ def cohort(db, qv_id, start=None, end=None, mode="offline"):
             Observation.observed_at >= left,
             Observation.observed_at < right,
             Run.mode == mode,
-            Run.state == "completed",
+            Run.state.in_(states),
         )
         .order_by(Observation.observed_at, Observation.id)
     ).all()
@@ -61,6 +61,16 @@ def cohort(db, qv_id, start=None, end=None, mode="offline"):
 
 def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
     rows, first, start, end, tz = cohort(db, qv_id, start, end, mode)
+    collected, _, _, _, _ = cohort(db, qv_id, start, end, mode, ("completed", "partial"))
+    collected_parsed = sum(
+        db.scalar(
+            select(Extraction.id)
+            .where(Extraction.snapshot_id == snapshot.id, Extraction.status == "valid")
+            .limit(1)
+        )
+        is not None
+        for _, _, snapshot in collected
+    )
     runs = list(
         db.scalars(
             select(Run)
@@ -164,6 +174,12 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
     latest = completed[0].finished_at if completed else None
     return {
         "meta": {
+            "collected_jobs": len(collected),
+            "latest_collection_at": next((r.finished_at for r in runs if r.finished_at), None),
+            "collected_parsed": collected_parsed,
+            "partial_only_jobs": len(
+                {job.id for _, job, _ in collected} - {job.id for _, job, _ in rows}
+            ),
             "query_version_id": qv_id,
             "from": start.isoformat(),
             "to": end.isoformat(),

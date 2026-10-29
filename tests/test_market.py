@@ -291,3 +291,32 @@ def test_date_window_validation(client, context):
         client.get(f"/api/v1/monitors/{mid}/overview?from=2026-10-29&to=2026-10-01").status_code
         == 422
     )
+
+
+def test_partial_live_jobs_visible_without_contaminating_trends(context, rows, clock, client):
+    factory, settings, mid, qid = context
+    settings.collection_mode = "live"
+    partial_rows = [
+        rows[0],
+        {**rows[1], "descriptionText": "", "detailError": "LinkedIn returned an access challenge"},
+    ]
+    with factory.begin() as db:
+        run = enqueue(db, mid, settings, clock)
+        ingest(db, run, partial_rows, settings, clock)
+        run.state = "partial"
+        run.finished_at = clock.isoformat()
+    window = "?from=2026-10-29&to=2026-10-29"
+    jobs = client.get(f"/api/v1/monitors/{mid}/jobs{window}").json()
+    assert len(jobs["data"]) == 2
+    assert {j["collection_state"] for j in jobs["data"]} == {"partial"}
+    assert sum(j["description_available"] for j in jobs["data"]) == 1
+    assert jobs["meta"]["includes_partial"]
+    overview = client.get(f"/api/v1/monitors/{mid}/overview{window}").json()
+    assert overview["data"]["jobs"] == 0
+    assert overview["data"]["daily"][0]["newly_observed"] is None
+    assert overview["meta"]["collected_jobs"] == 2
+    assert overview["meta"]["collected_parsed"] == 1
+    assert overview["meta"]["partial_only_jobs"] == 2
+    assert overview["meta"]["latest_collection_at"] == clock.isoformat()
+    settings.collection_mode = "offline"
+    assert client.get(f"/api/v1/monitors/{mid}/jobs{window}").json()["data"] == []

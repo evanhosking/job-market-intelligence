@@ -166,15 +166,17 @@ def create_app(factory=Session, settings=None):
         from_ = from_ or to - timedelta(days=27)
         if from_ > to or (to - from_).days > 366:
             raise HTTPException(422, "Invalid window; maximum 366 days")
-        rows, _, _, _, _ = cohort(db, qv.id, from_, to, mode=settings.collection_mode)
+        rows, _, _, _, _ = cohort(
+            db, qv.id, from_, to, mode=settings.collection_mode, states=("completed", "partial")
+        )
         selected = sorted(
             [
-                job
-                for _, job, _ in rows
+                (observation, job, snapshot)
+                for observation, job, snapshot in rows
                 if job.source_job_id > cursor
                 and search.casefold() in f"{job.title} {job.company} {job.location}".casefold()
             ],
-            key=lambda j: j.source_job_id,
+            key=lambda row: row[1].source_job_id,
         )
         page = selected[:limit]
         return {
@@ -188,10 +190,14 @@ def create_app(factory=Session, settings=None):
                     "first_seen_at": j.first_seen_at,
                     "last_seen_at": j.last_seen_at,
                     "posted_at": j.posted_at,
+                    "collection_state": db.get(Run, observation.run_id).state,
+                    "description_available": bool(snapshot.description),
+                    "detail_error": snapshot.raw.get("detailError"),
                 }
-                for j in page
+                for observation, j, snapshot in page
             ],
-            "next_cursor": page[-1].source_job_id if len(selected) > limit else None,
+            "next_cursor": page[-1][1].source_job_id if len(selected) > limit else None,
+            "meta": {"includes_partial": True, "total": len(rows)},
         }
 
     @app.get("/api/v1/jobs/{source}/{job_id}", dependencies=[Depends(auth)])
