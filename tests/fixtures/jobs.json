@@ -1,0 +1,14 @@
+[
+  {
+    "id": "4484251619", "title": "Senior Backend Engineer - Mobility",
+    "companyName": "Example Mobility", "location": "City Of Bristol, England, United Kingdom",
+    "postedAt": "2026-10-27", "salary": "", "seniorityLevel": "Not Applicable",
+    "employmentType": "Full-time", "applicantsCount": "25",
+    "descriptionText": "Required Experience: Strong grasp of C# .NET development; event-driven systems: Service Bus or similar such as Kafka or RabbitMQ; microservices; Azure or AWS or GCP; familiarity with Kubernetes and Docker; observability with Prometheus and Grafana; AI coding tools ideally Claude Code or similar. Fully remote within UTC -1 to UTC +3. Company has unlocked more than $2 billion in credit."
+  },
+  {
+    "id": "90071992547409931234", "title": "Software Engineer", "companyName": "Example Systems", "location": "London",
+    "salaryInfo": ["£50k–£70k/year"], "employmentType": "Full-time",
+    "descriptionText": "Required experience in Python and PostgreSQL; preferred TypeScript. Hybrid role in London."
+  }
+]

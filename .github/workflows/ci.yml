@@ -1,0 +1,43 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: market
+          POSTGRES_PASSWORD: market
+          POSTGRES_DB: market_test
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U market" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://market:market@localhost:5432/market_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - run: uv sync --locked
+      - run: uv run ruff check src tests db
+      - run: uv run ruff format --check src tests db
+      - run: uv run mypy src/market
+      - run: uv run pytest -q
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run build
