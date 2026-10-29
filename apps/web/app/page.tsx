@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import JobEvidence, { type JobDetail } from "./job-evidence";
+import SkillThemes, { type Skill, type Theme } from "./skill-themes";
 type Monitor = {
   id: string;
   version: number;
@@ -53,15 +54,6 @@ type Overview = {
   remote: number;
   remote_classifiable: number;
   daily: Day[];
-};
-type Skill = {
-  skill: string;
-  requiredness: string;
-  alternative: boolean;
-  count: number;
-  denominator: number;
-  percentage: number | null;
-  examples: { job_id: string; quote: string }[];
 };
 type Job = {
   description_cached: boolean;
@@ -134,6 +126,7 @@ export default function Dashboard() {
   const [overview, setOverview] = useState<Overview | null>(null),
     [meta, setMeta] = useState<Meta | null>(null),
     [skills, setSkills] = useState<Skill[]>([]);
+  const [themes, setThemes] = useState<Theme[]>([]);
   const [titles, setTitles] = useState<Record<string, Record<string, number>>>(
       {},
     ),
@@ -212,6 +205,7 @@ export default function Dashboard() {
       setOverview(o.data);
       setMeta(o.meta);
       setSkills(s.data);
+      setThemes(s.themes || []);
       setTitles(t.data);
       setSalaries(p.data);
       setJobs(j.data);
@@ -286,52 +280,7 @@ export default function Dashboard() {
     });
   }
   const skillTable = (
-    <div className="tablewrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Skill</th>
-            <th>Interpretation</th>
-            <th>Jobs / parsed</th>
-            <th>Share</th>
-            <th>Evidence</th>
-          </tr>
-        </thead>
-        <tbody>
-          {skills.map((s, i) => (
-            <tr key={s.skill + s.requiredness + i}>
-              <td>
-                <strong>{s.skill}</strong>
-              </td>
-              <td>
-                {s.requiredness}
-                {s.alternative ? " · alternative" : ""}
-              </td>
-              <td>
-                {s.count} / {s.denominator}
-              </td>
-              <td>{percent(s.percentage)}</td>
-              <td>
-                {s.examples.slice(0, 1).map((e) => (
-                  <button
-                    className="textbutton"
-                    key={e.job_id}
-                    onClick={() => openJob(e.job_id)}
-                  >
-                    Read source excerpt
-                  </button>
-                ))}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {!skills.length && (
-        <p className="empty">
-          No verified candidate requirements in this sample.
-        </p>
-      )}
-    </div>
+    <SkillThemes skills={skills} themes={themes} openJob={openJob} />
   );
   return (
     <div className="shell">

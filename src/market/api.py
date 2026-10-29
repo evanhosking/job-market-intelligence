@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, text
+from sqlalchemy import case, select, text
 from sqlalchemy.exc import IntegrityError
 
 from market.analytics import cohort, compute, observation_payload
@@ -14,10 +14,14 @@ from market.contracts import MonitorConfig
 from market.db import Session
 from market.models import Extraction, Monitor, QueryVersion, Run, Snapshot, SourceHealth, SourceJob
 from market.pipeline import enqueue
+from market.taxonomy import THEMES, themed_result
 
 
 def create_app(factory=Session, settings=None):
     settings = settings or Settings()
+    from market.observability import configure_logging
+
+    configure_logging(settings)
     app = FastAPI(title="Job Market Intelligence", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -235,22 +239,33 @@ def create_app(factory=Session, settings=None):
         extraction = db.scalar(
             select(Extraction)
             .where(Extraction.snapshot_id == snapshot.id, Extraction.status == "valid")
-            .order_by(Extraction.created_at.desc(), Extraction.id.desc())
+            .order_by(
+                case((Extraction.version.like("llm:%"), 0), else_=1),
+                Extraction.created_at.desc(),
+                Extraction.id.desc(),
+            )
         )
         latest_attempt = db.scalar(
             select(Extraction)
             .where(Extraction.snapshot_id == snapshot.id)
             .order_by(Extraction.created_at.desc(), Extraction.id.desc())
         )
+        latest_ai_attempt = db.scalar(
+            select(Extraction)
+            .where(Extraction.snapshot_id == snapshot.id, Extraction.version.like("llm:%"))
+            .order_by(Extraction.created_at.desc(), Extraction.id.desc())
+        )
+        latest_attempt = latest_ai_attempt or latest_attempt
         return {
             "id": job.source_job_id,
             "title": snapshot.raw.get("title"),
             "description": snapshot.description if include_source else None,
             "source_available": bool(snapshot.description),
-            "extraction": extraction.result if extraction else None,
+            "extraction": themed_result(extraction.result) if extraction else None,
             "extraction_status": extraction.status if extraction else "missing",
             "extraction_version": extraction.version if extraction else None,
             "processing_status": latest_attempt.status if latest_attempt else "missing",
+            "processing_diagnostics": latest_attempt.diagnostics if latest_attempt else {},
             "selection": extraction.diagnostics if extraction else {},
         }
 
@@ -263,6 +278,7 @@ def create_app(factory=Session, settings=None):
         requiredness: Literal["required", "preferred", "familiarity", "mentioned", "unclear"]
         | None = None,
         currency: Literal["GBP", "USD", "EUR"] | None = None,
+        theme: str | None = None,
         db=Depends(session),
     ):
         if from_ and to and (from_ > to or (to - from_).days > 366):
@@ -272,11 +288,20 @@ def create_app(factory=Session, settings=None):
         from_ = from_ or to - timedelta(days=27)
         if from_ > to or (to - from_).days > 366:
             raise HTTPException(422, "Invalid window; maximum 366 days")
+        if theme is not None and theme not in THEMES:
+            raise HTTPException(422, "Unknown skill theme")
         result = compute(db, qv.id, from_, to, settings.collection_mode, requiredness)
         data = result[view]
         if view == "salaries" and currency:
             data["groups"] = [g for g in data["groups"] if g["currency"] == currency]
-        return {"data": data, "meta": {**result["meta"], "source_health": health_data(db)}}
+        if view == "skills" and theme:
+            data = [item for item in data if item["theme"] == theme]
+        response = {"data": data, "meta": {**result["meta"], "source_health": health_data(db)}}
+        if view == "skills":
+            response["themes"] = [
+                item for item in result["themes"] if not theme or item["theme"] == theme
+            ]
+        return response
 
     return app
 

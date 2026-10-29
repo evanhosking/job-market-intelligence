@@ -20,3 +20,9 @@ A gap in daily counts means no completed daily run for that date. A successful e
 Snapshot extraction results carry prompt/model/taxonomy versions. Canonical aliases preserve C# versus .NET and map K8s to Kubernetes. Evidence quotes must occur verbatim in cleaned descriptions (or source salary text for rules). Alternative cloud/messaging tools share group identifiers and never become several independent strict must-haves. Company credit/revenue/funding and applicant counts cannot create salary.
 
 `metric_snapshots` keys are query version + selected window/mode + computation method. The reproducible computation is `market.analytics.compute` (method `listing-coverage-v2`); evidence job IDs come from the cohort's observations. Stored source observations and snapshots are the primary provenance. Retain them as long as dependent metrics are published.
+
+## Capability themes
+
+Method `capability-themes-v3` uses the deterministic, versioned `skills-v2` theme map for current and historical extraction results. Technical `category` (language/framework/cloud/tool/practice etc.) remains independent of `theme`, `subtheme`, `requiredness` and advert `context`. Known aliases normalize consistently; unknown AI/API labels can be grouped without fabricating extra evidence.
+
+Theme prevalence is distinct source job IDs with any supported non-negated relevant mention divided by parsed eligible descriptions. Theme context counts (candidate requirements, responsibilities, current stack, other mentions) can overlap and must not be summed. Detailed skill rows retain context and requiredness. Filtering `requiredness=required` selects candidate requirements only and excludes OR alternatives, as before. Unfiltered skills now include supported responsibilities/stack/other mentions, explicitly labelled; this is a methodology change from requirement-only rows.

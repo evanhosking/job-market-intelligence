@@ -13,7 +13,7 @@ from sqlalchemy import select, update
 
 from market.contracts import MonitorConfig
 from market.enrichment import check_source, enrich_jobs
-from market.extraction import ALIASES, clean_description, extract, version
+from market.extraction import clean_description, extract, version
 from market.models import (
     Budget,
     Compensation,
@@ -32,6 +32,7 @@ from market.models import (
     now,
     uid,
 )
+from market.taxonomy import ALIASES
 
 FIXTURE = Path(__file__).resolve().parents[2] / "tests/fixtures/jobs.json"
 
@@ -527,6 +528,22 @@ def work_once(factory, settings, clock=None, *, allow_live=False):
 
             process_saved(
                 factory, settings, limit=config.max_items, run_id=run_id, allow_live=allow_live
+            )
+        else:
+            from market.observability import event
+
+            event(
+                "ai.processing.skipped",
+                run_id=run_id,
+                mode=settings.llm_mode,
+                reason="offline_collection"
+                if mode == "offline"
+                else "rules_mode"
+                if settings.llm_mode == "rules"
+                else "model_or_key_unconfigured",
+                key_configured=bool(settings.llm_api_key),
+                model_configured=bool(settings.llm_model),
+                actual_calls=0,
             )
 
         with factory.begin() as db:

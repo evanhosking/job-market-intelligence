@@ -35,24 +35,34 @@ def main():
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--file", type=Path)
     parser.add_argument("--run-id")
+    parser.add_argument("--rules", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=50)
     args = parser.parse_args()
     settings = Settings()
-    if args.command == "extract":
-        from market.processing import process_saved
+    from market.observability import configure_logging
 
+    configure_logging(settings)
+    if args.command == "extract":
+        from market.processing import process_rules_saved, process_saved
+
+        if args.rules and (args.live or args.dry_run):
+            parser.error("--rules cannot be combined with --live or --dry-run")
         try:
-            result = process_saved(
-                Session,
-                settings,
-                limit=args.limit,
-                run_id=args.run_id,
-                allow_live=args.live and not args.dry_run,
+            result = (
+                process_rules_saved(Session, settings, limit=args.limit, run_id=args.run_id)
+                if args.rules
+                else process_saved(
+                    Session,
+                    settings,
+                    limit=args.limit,
+                    run_id=args.run_id,
+                    allow_live=args.live and not args.dry_run,
+                )
             )
         except ValueError as exc:
             parser.error(str(exc))
-        if args.live and not args.dry_run:
+        if args.rules or (args.live and not args.dry_run):
             with Session.begin() as db:
                 for processed_version in db.scalars(select(QueryVersion)):
                     materialize(db, processed_version.id)

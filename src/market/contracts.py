@@ -95,6 +95,18 @@ class Requirement(BaseModel):
         "experience",
         "other",
     ]
+    theme: Literal[
+        "ai_engineering",
+        "api_and_system_design",
+        "languages_and_frameworks",
+        "cloud_and_delivery",
+        "data_and_messaging",
+        "quality_and_observability",
+        "security",
+        "collaboration",
+        "other",
+    ] = "other"
+    subtheme: str = Field(default="general", max_length=80)
     requiredness: Literal["required", "preferred", "familiarity", "mentioned", "unclear"]
     context: Literal[
         "candidate_requirement",

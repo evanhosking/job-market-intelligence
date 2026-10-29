@@ -141,3 +141,28 @@ Preview reports only selected character counts, sections and snapshot IDs; it ne
 The monthly model budget is now reserved **per actual attempted request**, atomically before the call, independently of collection budgets. Token usage and selection hashes/offsets are stored, not full model prompts or response bodies. There is no dollar accounting; set an OpenAI project spending limit. In live workers, LLM processing runs after source ingestion commits; the deterministic result remains usable when the model is down. Offline replay never calls OpenAI.
 
 The Jobs detail panel shows categorized facts and expandable short evidence quotes. It requests the original full description only when you expand **Inspect original source description**. Raw JSON and full adverts are not displayed by default.
+
+## AI audit logging and capability themes
+
+AI processing emits JSON events to stderr (`LOG_LEVEL=INFO`, `LOG_FORMAT=json`; `text` is also supported). stdout remains the CLI command's JSON result. To capture an audit trail:
+
+```sh
+mkdir -p .logs
+uv run market extract --dry-run --limit 20 2> .logs/ai-preview.jsonl
+uv run market extract --live --limit 1 2> .logs/ai-processing.jsonl
+uv run market extract --rules --limit 100 2> .logs/rules-processing.jsonl
+```
+
+Rules processing makes **zero provider calls**, refreshes the saved descriptions with the latest deterministic taxonomy, and does not alter source sightings or replace an existing valid LLM result. All processing modes report `actual_calls`, including zero for previews/rules/cache hits. No automatic paid call is made merely to update themes.
+
+The AI audit records selection and skipped excerpts, budget reservations/exhaustion, cache hits (including failed/interrupted attempts), HTTP start/response/completion/failure, validation stage, persisted/quarantined results and batch totals. Correlation fields include batch/run/job/snapshot/extraction/call IDs and the provider request ID when available. Request events include model, endpoint host, prompt/selector/taxonomy version, selected/input character counts, excerpt count, input hash, output-token limit and structured-output/tool settings. Responses include timing, HTTP/finish status and reported token usage. Provider request IDs are captured from `x-request-id`; a generated `X-Client-Request-Id` correlates the outbound request. These fields follow [OpenAI request-debugging guidance](https://developers.openai.com/api/reference/overview#debugging-requests).
+
+Logs never include API keys, authorization headers, endpoint query strings, full prompts, descriptions, evidence quotes, response bodies or raw exception text. Underlying HTTP client URL logging is suppressed. Failed-attempt diagnostics are retained with the extraction and displayed under the job's **AI processing audit**, while the last valid classification remains available. Log files are private operational data; retain and rotate them outside Git.
+
+Skill recognition now covers AI-assisted development/output validation, coding assistants, generative AI, LLMs, RAG, agents, ML/MLOps, AI platforms, API design/versioning/contracts, REST/GraphQL/gRPC/OpenAPI and broader engineering practices. The two-level `skills-v2` taxonomy separates capability themes from technology types:
+
+- **AI engineering**: assisted development, applied AI, machine learning, AI platforms and frameworks.
+- **API and system design**: API design/protocols, integrations and system architecture.
+- Languages/frameworks, cloud/delivery, data/messaging, quality/observability, security and collaboration.
+
+The dashboard groups skills by theme and filters by evidence context. A theme counts each job once; candidate requirements, responsibilities and employer stack are reported separately and may overlap. Mentions are never silently promoted into must-haves, OR alternatives stay explicit, and negated requirements are excluded from prevalence. `GET .../skills?theme=ai_engineering` filters the detailed rows and returns a `themes` summary. Theme percentages use parsed descriptions as the denominator, with overall extraction coverage still shown.

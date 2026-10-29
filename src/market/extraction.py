@@ -1,37 +1,24 @@
 """Conservative offline rules and a tool-free, JSON-schema validated provider adapter."""
 
+import hashlib
 import json
+import logging
 import re
+import time
+from collections import Counter
 from typing import Any, cast
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 import httpx
 from bs4 import BeautifulSoup
 
 from market.contracts import JobExtraction, Pay, Requirement
+from market.observability import audit_context, event
 from market.selection import payload_excerpts, select_excerpts, selection_metadata
+from market.taxonomy import TAXONOMY_VERSION, classify_skill, find_skills
 
-RULE_VERSION = "rules-v2:prompt-v1:curated-v1"
-ALIASES = {
-    "C#": ["C#", "C Sharp"],
-    ".NET": [".NET"],
-    "Python": ["Python"],
-    "JavaScript": ["JavaScript", "JS"],
-    "TypeScript": ["TypeScript"],
-    "Kubernetes": ["Kubernetes", "K8s"],
-    "Docker": ["Docker"],
-    "AWS": ["AWS"],
-    "Azure": ["Azure"],
-    "GCP": ["GCP"],
-    "Kafka": ["Kafka"],
-    "RabbitMQ": ["RabbitMQ"],
-    "Service Bus": ["Service Bus"],
-    "Prometheus": ["Prometheus"],
-    "Grafana": ["Grafana"],
-    "Claude Code": ["Claude Code"],
-    "PostgreSQL": ["PostgreSQL", "Postgres"],
-    "React": ["React"],
-    "Microservices": ["microservices"],
-}
+RULE_VERSION = "rules-v3:prompt-v1:skills-v2"
 
 
 def clean_description(raw):
@@ -103,6 +90,7 @@ def rules(raw, text):
     experience = re.search(r"(\d+)\+?\s+years(?:'| of)?\s+experience", text, re.I)
     if experience:
         result.minimum_experience_years = float(experience[1])
+    excerpts = select_excerpts(text, max_chars=16000)
     # Classify a clause at a time: this fallback intentionally leaves ambiguous text unclear.
     for i, match in enumerate(re.finditer(r"[^;\n.!?]+(?:\.[Nn][Ee][Tt][^;\n.!?]*)?", text)):
         clause = match.group().strip()
@@ -127,38 +115,52 @@ def rules(raw, text):
             else "unclear"
         )
         group = f"alternative-{i}" if re.search(r"\bor\b|or similar", lc) else None
-        for canonical, aliases in ALIASES.items():
-            found = next(
-                (
-                    a
-                    for a in aliases
-                    if re.search(r"(?<!\w)" + re.escape(a) + r"(?!\w)", clause, re.I)
-                ),
-                None,
-            )
-            if found:
-                result.requirements.append(
-                    Requirement(
-                        canonical_candidate=canonical,
-                        surface_text=found,
-                        category="cloud"
-                        if canonical in {"AWS", "Azure", "GCP"}
-                        else "messaging"
-                        if canonical in {"Kafka", "Service Bus", "RabbitMQ"}
-                        else "tool",
-                        requiredness=cast(Any, requiredness),
-                        context=cast(Any, context),
-                        alternatives_group=group,
-                        explicit_negation=bool(re.search(r"\bno\b|not required", lc)),
-                        evidence_quote=clause[
-                            max(0, clause.lower().find(found.lower()) - 140) : max(
-                                0, clause.lower().find(found.lower()) - 140
-                            )
-                            + 350
-                        ].strip(),
-                        confidence=0.8 if context == "candidate_requirement" else 0.55,
-                    )
+        parent = next((e.section for e in excerpts if clause in e.text), "other")
+        if parent in {"requirements", "preferred"}:
+            context = "candidate_requirement"
+            if parent == "preferred" and requiredness in {"unclear", "familiarity"}:
+                requiredness = "preferred"
+            elif requiredness == "unclear":
+                requiredness = "required"
+        elif context == "other" and parent in {"responsibilities", "stack"}:
+            context = "responsibility" if parent == "responsibilities" else "current_stack"
+            requiredness = "mentioned"
+        if not any(clause in e.text for e in excerpts):
+            continue
+        for skill, surface, start, end in find_skills(clause):
+            quote_start = max(0, start - 140)
+            quote = clause[quote_start : quote_start + 350].strip()
+            result.requirements.append(
+                Requirement(
+                    canonical_candidate=skill.name,
+                    surface_text=surface,
+                    category=cast(Any, skill.category),
+                    theme=cast(Any, skill.theme),
+                    subtheme=skill.subtheme,
+                    requiredness=cast(Any, requiredness),
+                    context=cast(Any, context),
+                    alternatives_group=group,
+                    explicit_negation=bool(
+                        re.search(
+                            r"(?:\bno\s+|\bwithout\s+)"
+                            + re.escape(surface)
+                            + r"\b|"
+                            + re.escape(surface)
+                            + r"\s+(?:is\s+)?not\s+required",
+                            clause,
+                            re.I,
+                        )
+                    ),
+                    evidence_quote=quote,
+                    confidence=0.8
+                    if context == "candidate_requirement"
+                    else 0.65
+                    if context in {"current_stack", "responsibility"}
+                    else 0.55,
                 )
+            )
+    # Keep repeated mentions auditable while bounding the typed result size.
+    result.requirements = result.requirements[:40]
     salary_text = "\n".join([str(raw.get("salary") or ""), *(raw.get("salaryInfo") or [])])
     candidates = [salary_text] + [
         m.group() for m in re.finditer(r"[^\n.!?]*(?:salary|pay|rate)[^\n.!?]*", text, re.I)
@@ -247,11 +249,14 @@ Use the section labels to retain required/preferred context across line breaks. 
 Compensation must be explicit job pay, never funding, credit, revenue, applicant counts or benefits percentages. Leave ambiguous currency unknown.
 For every non-unknown classification provide field_evidence from the title or supplied excerpts. Use unknown/null/not_stated when unsupported.
 Every requirement and pay item needs a verbatim quote from a supplied excerpt. Set evidence offsets to null; the server resolves original offsets.
+Identify explicit AI engineering capabilities: AI-assisted development, AI output validation, LLMs, generative AI, RAG, agents, prompt engineering, ML/MLOps and specific AI tools. Distinguish building AI systems from using AI coding assistants. Both belong to theme ai_engineering with separate subthemes.
+Also identify API design, REST, GraphQL, gRPC, OpenAPI, versioning, contracts, integrations and system architecture under api_and_system_design. Do not infer these from an unrelated mention of a company API.
+Assign every skill a capability theme and a specific subtheme, independently of its technical category and requiredness. Other themes: languages_and_frameworks, cloud_and_delivery, data_and_messaging, quality_and_observability, security, collaboration, other.
 Only describe what the selected excerpts establish; omission is not proof that a requirement is absent.
 """
 
 
-def parse_with_llm(raw, settings):
+def _parse_with_llm(raw, settings, trace):
     if not settings.llm_api_key or not settings.llm_model:
         raise ValueError("LLM key and explicit model required")
     text = clean_description(raw)
@@ -260,10 +265,33 @@ def parse_with_llm(raw, settings):
         raise ValueError("No relevant excerpts available")
     title = str(raw.get("title") or "")[:200]
     payload = {"title": title, "excerpts": payload_excerpts(excerpts)}
+    trace.update(
+        source_chars=len(text),
+        selected_chars=sum(len(e.text) for e in excerpts),
+        excerpt_count=len(excerpts),
+        endpoint_host=urlsplit(settings.llm_endpoint).hostname,
+        model=settings.llm_model,
+        failure_stage="http",
+    )
+    event(
+        "ai.request.started",
+        **trace,
+        prompt_version="prompt-v3",
+        selector_version="sections-v1",
+        taxonomy_version=TAXONOMY_VERSION,
+        purpose="job_skill_classification",
+        input_sha256=hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(),
+        output_token_cap=settings.llm_output_token_cap,
+        tools_enabled=False,
+        structured_output=True,
+    )
     with httpx.Client(timeout=45) as client:
         response = client.post(
             settings.llm_endpoint,
-            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+            headers={
+                "Authorization": f"Bearer {settings.llm_api_key}",
+                "X-Client-Request-Id": trace["call_id"],
+            },
             json={
                 "model": settings.llm_model,
                 "max_completion_tokens": settings.llm_output_token_cap,
@@ -281,9 +309,30 @@ def parse_with_llm(raw, settings):
                 },
             },
         )
+        trace.update(
+            http_status=response.status_code,
+            provider_request_id=response.headers.get("x-request-id"),
+            failure_stage="response",
+        )
+        event("ai.response.received", **trace)
         response.raise_for_status()
         body = response.json()
+        trace["usage"] = {
+            k: v
+            for k, v in body.get("usage", {}).items()
+            if k in {"prompt_tokens", "completion_tokens", "total_tokens"}
+            and isinstance(v, int)
+            and v >= 0
+        }
+        trace["provider_response_id"] = body.get("id")
+    trace["failure_stage"] = "schema_validation"
     choice = body["choices"][0]
+    trace["finish_reason"] = (
+        choice.get("finish_reason")
+        if choice.get("finish_reason")
+        in {"stop", "length", "content_filter", "tool_calls", "function_call"}
+        else "unknown"
+    )
     if choice.get("finish_reason") != "stop" or choice["message"].get("refusal"):
         raise ValueError("Model refused or returned incomplete output")
     result = JobExtraction.model_validate_json(choice["message"]["content"])
@@ -291,20 +340,18 @@ def parse_with_llm(raw, settings):
     def supplied(quote):
         return any(quote in e.text for e in excerpts)
 
+    trace["failure_stage"] = "evidence_validation"
     for req in result.requirements:
         if not supplied(req.evidence_quote):
             raise ValueError("Requirement evidence was not supplied to model")
         if req.surface_text.casefold() not in req.evidence_quote.casefold():
             raise ValueError("Requirement surface text is not supported by quote")
-        canonical = next(
-            (
-                name
-                for name, aliases in ALIASES.items()
-                if req.canonical_candidate.casefold() in {a.casefold() for a in [name, *aliases]}
-            ),
-            req.canonical_candidate,
+        canonical, category, theme, subtheme = classify_skill(
+            req.canonical_candidate, req.surface_text, req.category
         )
-        req.canonical_candidate = canonical
+        req.canonical_candidate, req.category = canonical, cast(Any, category)
+        if theme != "other" or req.theme == "other":
+            req.theme, req.subtheme = cast(Any, theme), subtheme
         req.evidence_start = next(
             e.start + e.text.index(req.evidence_quote)
             for e in excerpts
@@ -373,6 +420,7 @@ def parse_with_llm(raw, settings):
     result.extraction_warnings.append("Selected excerpts only; unselected text was not assessed")
     metadata = selection_metadata(text, excerpts)
     metadata["model"] = settings.llm_model
+    metadata["taxonomy_version"] = TAXONOMY_VERSION
     metadata["usage"] = {
         k: v
         for k, v in body.get("usage", {}).items()
@@ -383,18 +431,79 @@ def parse_with_llm(raw, settings):
     return evidence_check(result, text), metadata
 
 
+def parse_with_llm(raw, settings):
+    trace: dict[str, Any] = {
+        "call_id": str(uuid4()),
+        "model": settings.llm_model,
+        "failure_stage": "selection",
+    }
+    started = time.perf_counter()
+    with audit_context(call_id=trace["call_id"], job_id=str(raw.get("id") or "unknown")):
+        try:
+            result, metadata = _parse_with_llm(raw, settings, trace)
+        except Exception as exc:
+            trace.update(
+                error_type=type(exc).__name__,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                validation_status="failed"
+                if trace.get("failure_stage") in {"schema_validation", "evidence_validation"}
+                else "not_run",
+            )
+            message = str(exc) if isinstance(exc, ValueError) else ""
+            trace["failure_code"] = (
+                "unsupported_evidence"
+                if "evidence" in message.lower() or "quote" in message.lower()
+                else "refused_or_incomplete"
+                if "refused" in message.lower() or "incomplete" in message.lower()
+                else "schema_invalid"
+                if type(exc).__name__ == "ValidationError"
+                else "http_error"
+                if isinstance(exc, httpx.HTTPStatusError)
+                else "timeout"
+                if isinstance(exc, httpx.TimeoutException)
+                else "configuration_missing"
+                if "key and explicit model" in message
+                else "processing_error"
+            )
+            event("ai.request.failed", level=logging.WARNING, **trace)
+            setattr(exc, "ai_diagnostics", trace)
+            raise
+        trace.update(
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            validation_status="passed",
+            requirement_count=len(result.requirements),
+            compensation_count=len(result.compensation),
+            theme_counts=dict(Counter(req.theme for req in result.requirements)),
+        )
+        trace.pop("failure_stage", None)
+        event("ai.request.completed", **trace)
+        metadata.update(trace)
+        return result, metadata
+
+
 def extract(raw, settings):
     text = clean_description(raw)
     if not text:
         raise ValueError("No job description")
     if len(text) > 60000:
         raise ValueError("Description exceeds extraction size cap")
-    return rules(raw, text) if settings.llm_mode == "rules" else parse_with_llm(raw, settings)[0]
+    if settings.llm_mode == "rules":
+        result = rules(raw, text)
+        event(
+            "ai.rules.used",
+            job_id=str(raw.get("id") or "unknown"),
+            mode="rules",
+            requirement_count=len(result.requirements),
+            theme_counts=dict(Counter(r.theme for r in result.requirements)),
+            actual_calls=0,
+        )
+        return result
+    return parse_with_llm(raw, settings)[0]
 
 
 def version(settings):
     return (
         RULE_VERSION
         if settings.llm_mode == "rules"
-        else f"llm:{settings.llm_model}:prompt-v2:sections-v1:curated-v1"
+        else f"llm:{settings.llm_model}:prompt-v3:sections-v1:skills-v2"
     )

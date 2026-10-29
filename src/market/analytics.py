@@ -3,7 +3,7 @@ from datetime import UTC, datetime, time, timedelta
 from statistics import median
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, case, or_, select
 
 from market.models import (
     Extraction,
@@ -15,8 +15,9 @@ from market.models import (
     SourceJob,
     now,
 )
+from market.taxonomy import TAXONOMY_VERSION, THEMES, themed_result
 
-METHOD = "listing-coverage-v2"
+METHOD = "capability-themes-v3"
 
 
 def listing_eligible():
@@ -101,6 +102,9 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
     parsed = 0
     skills = defaultdict(set)
     examples: dict[tuple, list[dict]] = defaultdict(list)
+    theme_jobs = defaultdict(set)
+    theme_context_jobs = defaultdict(set)
+    theme_skills = defaultdict(set)
     titles: Counter[str] = Counter()
     seniorities: Counter[str] = Counter()
     arrangements: Counter[str] = Counter()
@@ -116,30 +120,46 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
         extraction = db.scalar(
             select(Extraction)
             .where(Extraction.snapshot_id == snapshot.id, Extraction.status == "valid")
-            .order_by(Extraction.created_at.desc(), Extraction.id.desc())
+            .order_by(
+                case((Extraction.version.like("llm:%"), 0), else_=1),
+                Extraction.created_at.desc(),
+                Extraction.id.desc(),
+            )
         )
         if not extraction or observation_payload(db, observation, snapshot).get("descriptionStale"):
             seniorities["unknown"] += 1
             arrangements["unspecified"] += 1
             continue
         parsed += 1
-        data = extraction.result
+        data = themed_result(extraction.result)
         extraction_versions.add(extraction.version)
         seniorities[data["seniority"]] += 1
         arrangements[data["work_arrangement"]] += 1
         for req in data["requirements"]:
             if (
                 req["explicit_negation"]
-                or req["context"] != "candidate_requirement"
-                or req["confidence"] < 0.7
+                or req["context"] in {"benefit", "company_description"}
+                or req["confidence"] < (0.7 if req["context"] == "candidate_requirement" else 0.5)
             ):
                 continue
-            if requiredness and req["requiredness"] != requiredness:
+            if requiredness and (
+                req["requiredness"] != requiredness or req["context"] != "candidate_requirement"
+            ):
                 continue
             # Alternative members never count as independent strict requirements.
             if requiredness == "required" and req["alternatives_group"]:
                 continue
-            key = (req["canonical_candidate"], req["requiredness"], bool(req["alternatives_group"]))
+            key = (
+                req["canonical_candidate"],
+                req["requiredness"],
+                bool(req["alternatives_group"]),
+                req["theme"],
+                req["subtheme"],
+                req["context"],
+            )
+            theme_jobs[req["theme"]].add(job.source_job_id)
+            theme_context_jobs[(req["theme"], req["context"])].add(job.source_job_id)
+            theme_skills[req["theme"]].add(req["canonical_candidate"])
             skills[key].add(job.source_job_id)
             if len(examples[key]) < 3:
                 examples[key].append(
@@ -216,6 +236,7 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
             "parsed": parsed,
             "extraction_coverage": parsed / eligible if eligible else None,
             "methodology": METHOD,
+            "theme_taxonomy_version": TAXONOMY_VERSION,
             "extraction_versions": sorted(extraction_versions),
             "mixed_extraction_versions": len(extraction_versions) > 1,
             "computed_at": now(),
@@ -242,12 +263,31 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
                 "skill": k[0],
                 "requiredness": k[1],
                 "alternative": k[2],
+                "theme": k[3],
+                "theme_label": THEMES[k[3]],
+                "subtheme": k[4],
+                "context": k[5],
                 "count": len(ids),
                 "denominator": parsed,
                 "percentage": len(ids) / parsed if parsed else None,
                 "examples": examples[k],
             }
             for k, ids in sorted(skills.items(), key=lambda item: (-len(item[1]), item[0]))
+        ],
+        "themes": [
+            {
+                "theme": theme,
+                "label": THEMES[theme],
+                "count": len(ids),
+                "denominator": parsed,
+                "percentage": len(ids) / parsed if parsed else None,
+                "requirement_count": len(theme_context_jobs[(theme, "candidate_requirement")]),
+                "responsibility_count": len(theme_context_jobs[(theme, "responsibility")]),
+                "stack_count": len(theme_context_jobs[(theme, "current_stack")]),
+                "mentioned_count": len(theme_context_jobs[(theme, "other")]),
+                "skills": sorted(theme_skills[theme]),
+            }
+            for theme, ids in sorted(theme_jobs.items(), key=lambda item: (-len(item[1]), item[0]))
         ],
         "titles": {
             "titles": dict(titles),

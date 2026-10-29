@@ -38,7 +38,7 @@ HEADINGS = [
     ),
 ]
 SIGNAL = re.compile(
-    r"\b(?:requir\w*|qualifications?|experience|proficien\w*|expertise|familiar\w*|knowledge|skills?|degree|certification|responsib\w*|develop\w*|design\w*|implement\w*|architect\w*|maintain\w*|mentor\w*|remote|hybrid|on-site|onsite|timezone|time zone|UTC|salary|per annum|annual pay|tech stack)\b|(?:£|€|USD|GBP|EUR)\s*\d",
+    r"\b(?:AI|LLMs?|GenAI|APIs?|GraphQL|gRPC|OpenAPI|Copilot|Cursor|Claude|RAG|MLOps|requir\w*|qualifications?|experience|proficien\w*|expertise|familiar\w*|knowledge|skills?|degree|certification|responsib\w*|develop\w*|design\w*|implement\w*|architect\w*|maintain\w*|mentor\w*|remote|hybrid|on-site|onsite|timezone|time zone|UTC|salary|per annum|annual pay|tech stack)\b|(?:£|€|USD|GBP|EUR)\s*\d",
     re.I,
 )
 INJECTION = re.compile(

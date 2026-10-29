@@ -4,6 +4,8 @@ import { useState } from "react";
 type Requirement = {
   canonical_candidate: string;
   category: string;
+  theme: string;
+  subtheme: string;
   requiredness: string;
   context: string;
   alternatives_group: string | null;
@@ -41,6 +43,21 @@ export type JobDetail = {
   extraction_version: string | null;
   processing_status: string;
   selection: { source_chars?: number; selected_chars?: number };
+  processing_diagnostics?: {
+    model?: string;
+    duration_ms?: number;
+    http_status?: number;
+    provider_request_id?: string;
+    call_id?: string;
+    validation_status?: string;
+    failure_code?: string;
+    failure_stage?: string;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
+  };
 };
 const label = (value: string) => value.replaceAll("_", " ");
 export default function JobEvidence({
@@ -55,18 +72,19 @@ export default function JobEvidence({
     [error, setError] = useState("");
   const data = detail.extraction;
   const groups = data
-    ? [
-        ...new Set(
-          data.requirements.map((r) =>
-            r.explicit_negation
-              ? "Explicitly not required"
-              : r.context === "candidate_requirement"
-                ? label(r.requiredness)
-                : label(r.context),
-          ),
-        ),
-      ]
+    ? [...new Set(data.requirements.map((r) => r.theme || "other"))]
     : [];
+  const themeLabels: Record<string, string> = {
+    ai_engineering: "AI engineering",
+    api_and_system_design: "API and system design",
+    languages_and_frameworks: "Languages and frameworks",
+    cloud_and_delivery: "Cloud and delivery",
+    data_and_messaging: "Data and messaging",
+    quality_and_observability: "Quality and observability",
+    security: "Security",
+    collaboration: "Collaboration and leadership",
+    other: "Other skills",
+  };
   return (
     <article className="evidence">
       <h3>{detail.title || "Job evidence"}</h3>
@@ -78,6 +96,33 @@ export default function JobEvidence({
           ? " · Latest processing attempt needs review; showing the last valid result."
           : ""}
       </p>
+      {(detail.processing_diagnostics?.call_id ||
+        detail.processing_diagnostics?.model) && (
+        <details>
+          <summary>AI processing audit</summary>
+          <dl className="jobfacts">
+            {Object.entries({
+              Model: detail.processing_diagnostics.model,
+              "HTTP status": detail.processing_diagnostics.http_status,
+              "Duration (ms)": detail.processing_diagnostics.duration_ms,
+              Validation: detail.processing_diagnostics.validation_status,
+              "Failure stage": detail.processing_diagnostics.failure_stage,
+              "Failure reason": detail.processing_diagnostics.failure_code,
+              "Total tokens": detail.processing_diagnostics.usage?.total_tokens,
+              "Call ID": detail.processing_diagnostics.call_id,
+              "Provider request ID":
+                detail.processing_diagnostics.provider_request_id,
+            })
+              .filter(([, value]) => value !== undefined && value !== null)
+              .map(([key, value]) => (
+                <div key={key}>
+                  <dt>{key}</dt>
+                  <dd>{String(value)}</dd>
+                </div>
+              ))}
+          </dl>
+        </details>
+      )}
       {data ? (
         <>
           <dl className="jobfacts">
@@ -113,7 +158,7 @@ export default function JobEvidence({
           </dl>
           {groups.map((group) => (
             <section key={group}>
-              <h4>{group}</h4>
+              <h4>{themeLabels[group] || label(group)}</h4>
               <div className="tablewrap">
                 <table>
                   <thead>
@@ -125,14 +170,7 @@ export default function JobEvidence({
                   </thead>
                   <tbody>
                     {data.requirements
-                      .filter(
-                        (r) =>
-                          (r.explicit_negation
-                            ? "Explicitly not required"
-                            : r.context === "candidate_requirement"
-                              ? label(r.requiredness)
-                              : label(r.context)) === group,
-                      )
+                      .filter((r) => (r.theme || "other") === group)
                       .map((r, i) => (
                         <tr key={r.canonical_candidate + i}>
                           <td>
@@ -146,7 +184,16 @@ export default function JobEvidence({
                               <small>Low confidence</small>
                             )}
                           </td>
-                          <td>{label(r.category)}</td>
+                          <td>
+                            {label(r.category)}
+                            <small>{label(r.subtheme || "general")}</small>
+                            <small>
+                              {r.explicit_negation
+                                ? "Explicitly not required"
+                                : label(r.requiredness)}{" "}
+                              · {label(r.context)}
+                            </small>
+                          </td>
                           <td>
                             <details>
                               <summary>Read short quote</summary>
