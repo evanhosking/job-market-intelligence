@@ -277,9 +277,7 @@ def test_live_budget_and_demo_do_not_collide(context, clock):
         settings.collection_mode = "live"
         settings.llm_mode = "live"
         settings.llm_monthly_request_cap = 0
-        with pytest.raises(ValueError, match="budget"):
-            enqueue(db, mid, settings, clock)
-        settings.llm_mode = "rules"
+        # Collection remains available even when the independently reserved model budget is zero.
         live = enqueue(db, mid, settings, clock)
         assert live.id != offline.id and live.mode == "live"
 

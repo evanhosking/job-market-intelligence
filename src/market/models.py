@@ -119,6 +119,7 @@ class Extraction(Base):
     result: Mapped[dict] = mapped_column(Json)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, default=now)
+    diagnostics: Mapped[dict] = mapped_column(Json, default=dict)
 
 
 class Quarantine(Base):

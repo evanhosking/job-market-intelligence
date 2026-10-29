@@ -67,7 +67,7 @@ Conservative limits: 1–100 jobs per run, `MONTHLY_ITEM_CAP=3000` reserved item
 
 `LLM_MODE=rules` is the offline default and never calls a provider. The curated English rules retain uncertainty and cannot match a language model's full semantic coverage. Versioned results and exact supporting quotes are stored alongside raw snapshots. Missing descriptions and invalid outputs are quarantined without blocking ingestion.
 
-An experimental, tool-free OpenAI-compatible structured-response adapter is included. To opt in, configure server-only `LLM_API_KEY`, explicit `LLM_MODEL`, optional `LLM_ENDPOINT`, and `LLM_MODE=live` with live collection. The model must support JSON-schema responses and `max_completion_tokens`. No provider request has been verified live. Calls have 45-second timeout, 60,000-character input cap and 4,000 output-token cap; one attempt per new snapshot, no paid automatic retries. `LLM_MONTHLY_REQUEST_CAP=100` reserves the maximum possible calls before a live run is queued. Interrupted runs never automatically repeat uncertain calls. **This is a request/token budget, not dollar accounting.** Configure a provider-side spending ceiling before use. Offline runs and replay always force deterministic rules, even if live LLM credentials are present.
+OpenAI structured extraction is available with server-only `LLM_API_KEY`, explicit `LLM_MODEL`, and `LLM_MODE=live`. It uses selected excerpts capped at 8,000 characters, a 3,500 output-token cap and a 45-second request timeout by default. Each snapshot/model/prompt/selection version is attempted at most once automatically, with a durable monthly request reservation made before transmission. Failed model output leaves the existing rules result available. **This is a request/token budget, not dollar accounting.** Configure an OpenAI project spending limit. Offline replay always uses rules. See the focused extraction setup below; live provider behavior still requires a configured key and a small acceptance run.
 
 ## Verification
 
@@ -110,3 +110,34 @@ uv run market retry-details --live --run-id RUN_ID --limit 50
 `refresh` explicitly queues a separate manual run and creates a new immutable query version if the requested cap changes. `retry-details` creates a bounded recovery run from saved listings, retaining the original listing completeness. Neither command itself issues network requests. The live worker requires both live configuration and `--live`, and can only claim live queue entries; offline workers cannot execute live work.
 
 For a confirmed challenge, inspect source diagnostics first. An operator can explicitly re-enable guest collection with `uv run market source-resume --live`; this does not log in, solve a challenge or bypass access controls. The dashboard and `/api/v1/source-health` report available, cooldown or paused state. Existing jobs remain inspectable during a pause.
+
+## Categorize saved descriptions with OpenAI
+
+The classifier first selects relevant requirements, qualifications, responsibilities, stack, work arrangement and advertised-pay excerpts. It excludes recognized company/benefits/recruitment sections, caps selected text at 8,000 characters and never falls back to blindly sending the complete advert. A short advert consisting entirely of relevant facts can still have most of its text selected. Selection is heuristic: preview it and treat unselected text as unassessed, not evidence of an absent requirement.
+
+The OpenAI request uses strict JSON Schema, bounded output and no tools. Required/preferred/familiarity, employer stack and responsibilities remain distinct. OR alternatives and negation are preserved. Requirements and compensation must quote supplied text; quotes are bounded to 400 characters and checked against source offsets. Known classifications also require evidence. Numeric pay values, currency and period must be supported by their quotes. Schema/evidence failures are quarantined and leave the previous valid rules result available.
+
+Set server `.env` values locally:
+
+```dotenv
+LLM_MODE=live
+LLM_MODEL=gpt-4.1-mini
+LLM_API_KEY=your-local-key
+LLM_INPUT_CHAR_CAP=8000
+LLM_OUTPUT_TOKEN_CAP=3500
+LLM_MONTHLY_REQUEST_CAP=100
+```
+
+Keep the key out of chat, Git and public frontend variables. GPT-4.1 mini is an example supporting structured outputs; select a model available to your OpenAI project. The default endpoint is `https://api.openai.com/v1/chat/completions`. Consult [OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=chat) and [model documentation](https://developers.openai.com/api/docs/models/gpt-4.1-mini).
+
+```sh
+uv run alembic upgrade head
+uv run market extract --dry-run --limit 20
+uv run market extract --live --limit 20
+```
+
+Preview reports only selected character counts, sections and snapshot IDs; it never sends a model request or prints full descriptions. Live extraction reprocesses saved **live** descriptions without scraping and recomputes materialized metrics. Use `--run-id ID` to restrict a batch. Begin with `--limit 1` to inspect quality. Successful, failed or interrupted attempts are cached per snapshot/model/prompt/selection version; repeated commands do not automatically repeat an uncertain paid request.
+
+The monthly model budget is now reserved **per actual attempted request**, atomically before the call, independently of collection budgets. Token usage and selection hashes/offsets are stored, not full model prompts or response bodies. There is no dollar accounting; set an OpenAI project spending limit. In live workers, LLM processing runs after source ingestion commits; the deterministic result remains usable when the model is down. Offline replay never calls OpenAI.
+
+The Jobs detail panel shows categorized facts and expandable short evidence quotes. It requests the original full description only when you expand **Inspect original source description**. Raw JSON and full adverts are not displayed by default.

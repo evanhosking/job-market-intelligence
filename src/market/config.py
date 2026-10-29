@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     detail_max_attempts: int = Field(default=3, ge=1, le=5)
     request_cap: int = Field(default=250, ge=1, le=1000)
     llm_monthly_request_cap: int = Field(default=100, ge=0, le=10000)
+    llm_input_char_cap: int = Field(default=8000, ge=1000, le=16000)
+    llm_output_token_cap: int = Field(default=3500, ge=500, le=6000)
     llm_mode: Literal["rules", "live"] = "rules"
     llm_api_key: str = ""
     llm_model: str = ""

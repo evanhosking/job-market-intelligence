@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import JobEvidence, { type JobDetail } from "./job-evidence";
 type Monitor = {
   id: string;
   version: number;
@@ -142,10 +143,7 @@ export default function Dashboard() {
   const [insights, setInsights] = useState<
       { status: string; text: string; job_ids: string[] }[]
     >([]),
-    [detail, setDetail] = useState<{
-      description: string;
-      extraction: unknown;
-    } | null>(null);
+    [detail, setDetail] = useState<JobDetail | null>(null);
   const [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
@@ -883,17 +881,16 @@ export default function Dashboard() {
                   </button>
                 )}
                 {detail && (
-                  <article className="evidence">
-                    <h3>Source description</h3>
-                    <p className="description">
-                      {detail.description ||
-                        "LinkedIn did not provide a description for this listing. Its listing details were saved, but its requirements could not be extracted."}
-                    </p>
-                    <details open>
-                      <summary>Validated extraction and evidence</summary>
-                      <pre>{JSON.stringify(detail.extraction, null, 2)}</pre>
-                    </details>
-                  </article>
+                  <JobEvidence
+                    key={detail.id}
+                    detail={detail}
+                    loadSource={async () => {
+                      const source = await request(
+                        `/jobs/linkedin/${encodeURIComponent(detail.id)}?include_source=true`,
+                      );
+                      return source.description || "";
+                    }}
+                  />
                 )}
               </section>
             )}

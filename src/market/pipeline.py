@@ -77,11 +77,7 @@ def enqueue(db, monitor_id, settings, clock=None, kind="daily"):
         if not db.get(Budget, month):
             db.add(Budget(month=month, reserved=0, llm_reserved=0))
             db.flush()
-    llm_reservation = (
-        config.max_items
-        if settings.llm_mode == "live" and settings.collection_mode == "live"
-        else 0
-    )
+    llm_reservation = 0  # Paid requests are reserved atomically by the extraction stage.
     reserved = db.execute(
         update(Budget)
         .where(
@@ -125,8 +121,7 @@ def digest(value):
 
 def ingest(db, run, rows, settings, clock=None):
     # Offline replay must never invoke a paid model, even with live keys configured.
-    if run.mode == "offline":
-        settings = settings.model_copy(update={"llm_mode": "rules"})
+    settings = settings.model_copy(update={"llm_mode": "rules"})
     stamp = (clock or datetime.now(UTC)).isoformat()
     counts = {"fetched": len(rows), "quarantined": 0, "extracted": 0}
     if not isinstance(rows, list):
@@ -521,6 +516,18 @@ def work_once(factory, settings, clock=None, *, allow_live=False):
                 "collection_finished run_id=%s state=%s counts=%s", run.id, run.state, counts
             )
         from market.analytics import materialize
+
+        if (
+            mode == "live"
+            and settings.llm_mode == "live"
+            and settings.llm_api_key
+            and settings.llm_model
+        ):
+            from market.processing import process_saved
+
+            process_saved(
+                factory, settings, limit=config.max_items, run_id=run_id, allow_live=allow_live
+            )
 
         with factory.begin() as db:
             materialize(db, db.get(Run, run_id).query_version_id)

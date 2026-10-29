@@ -79,8 +79,8 @@ class MonitorConfig(BaseModel):
 
 class Requirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    canonical_candidate: str = Field(min_length=1)
-    surface_text: str
+    canonical_candidate: str = Field(min_length=1, max_length=100)
+    surface_text: str = Field(max_length=150)
     category: Literal[
         "language",
         "framework",
@@ -106,7 +106,7 @@ class Requirement(BaseModel):
     ]
     alternatives_group: str | None = None
     explicit_negation: bool = False
-    evidence_quote: str = Field(min_length=1)
+    evidence_quote: str = Field(min_length=1, max_length=400)
     evidence_start: int | None = Field(default=None, ge=0)
     evidence_end: int | None = Field(default=None, ge=0)
     confidence: float = Field(ge=0, le=1)
@@ -123,7 +123,7 @@ class Pay(BaseModel):
     period: Literal["hour", "day", "week", "month", "year", "unknown"] = "unknown"
     employment_basis: Literal["full_time", "part_time", "unknown"] = "unknown"
     explicit_in_job_ad: bool = True
-    evidence_quote: str = Field(min_length=1)
+    evidence_quote: str = Field(min_length=1, max_length=400)
     confidence: float = Field(ge=0, le=1)
 
     @model_validator(mode="after")
@@ -137,9 +137,25 @@ class Pay(BaseModel):
         return self
 
 
+class FieldEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    field: Literal[
+        "normalized_title",
+        "role_family",
+        "seniority",
+        "work_arrangement",
+        "remote_geo_restriction",
+        "contract_type",
+        "minimum_experience_years",
+        "degree_requirement",
+    ]
+    evidence_quote: str = Field(min_length=1, max_length=400)
+    source: Literal["title", "description"]
+
+
 class JobExtraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    normalized_title: str | None = None
+    normalized_title: str | None = Field(default=None, max_length=200)
     role_family: Literal["software_engineering", "other", "unknown"] = "unknown"
     seniority: Literal[
         "intern",
@@ -157,12 +173,13 @@ class JobExtraction(BaseModel):
         "explicit_title", "explicit_description", "source_field", "inferred", "unknown"
     ] = "unknown"
     work_arrangement: Literal["remote", "hybrid", "onsite", "unspecified"] = "unspecified"
-    remote_geo_restriction: str | None = None
+    remote_geo_restriction: str | None = Field(default=None, max_length=200)
     contract_type: Literal[
         "permanent", "contract", "temporary", "internship", "other", "unknown"
     ] = "unknown"
     minimum_experience_years: float | None = Field(default=None, ge=0, le=60)
     degree_requirement: Literal["required", "preferred", "not_stated"] = "not_stated"
-    requirements: list[Requirement] = Field(default_factory=list, max_length=100)
+    requirements: list[Requirement] = Field(default_factory=list, max_length=40)
     compensation: list[Pay] = Field(default_factory=list, max_length=20)
-    extraction_warnings: list[str] = Field(default_factory=list)
+    field_evidence: list[FieldEvidence] = Field(default_factory=list, max_length=12)
+    extraction_warnings: list[str] = Field(default_factory=list, max_length=12)

@@ -564,3 +564,27 @@ footer a {
     }
   }
 }
+
+.jobfacts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 18px;
+  margin: 24px 0;
+}
+.jobfacts dt {
+  font-size: 12px;
+  color: var(--muted);
+}
+.jobfacts dd {
+  margin: 4px 0 0;
+}
+blockquote {
+  margin: 12px 0;
+  max-width: 65ch;
+  color: var(--muted);
+  font-size: 13px;
+}
+h4 {
+  font-size: 16px;
+  margin: 24px 0 10px;
+}

@@ -72,7 +72,7 @@ def create_app(factory=Session, settings=None):
     @app.get("/api/v1/health/ready")
     def ready(db=Depends(session)):
         try:
-            if db.scalar(text("SELECT version_num FROM alembic_version")) != "0002":
+            if db.scalar(text("SELECT version_num FROM alembic_version")) != "0003":
                 raise ValueError("Migration revision is not current")
         except Exception:
             raise HTTPException(503, "Database unavailable or migrations missing")
@@ -223,7 +223,7 @@ def create_app(factory=Session, settings=None):
         }
 
     @app.get("/api/v1/jobs/{source}/{job_id}", dependencies=[Depends(auth)])
-    def detail(source: str, job_id: str, db=Depends(session)):
+    def detail(source: str, job_id: str, include_source: bool = False, db=Depends(session)):
         job = db.scalar(
             select(SourceJob).where(SourceJob.source == source, SourceJob.source_job_id == job_id)
         )
@@ -234,15 +234,24 @@ def create_app(factory=Session, settings=None):
         )
         extraction = db.scalar(
             select(Extraction)
+            .where(Extraction.snapshot_id == snapshot.id, Extraction.status == "valid")
+            .order_by(Extraction.created_at.desc(), Extraction.id.desc())
+        )
+        latest_attempt = db.scalar(
+            select(Extraction)
             .where(Extraction.snapshot_id == snapshot.id)
             .order_by(Extraction.created_at.desc(), Extraction.id.desc())
         )
         return {
             "id": job.source_job_id,
-            "description": snapshot.description,
-            "raw": snapshot.raw,
+            "title": snapshot.raw.get("title"),
+            "description": snapshot.description if include_source else None,
+            "source_available": bool(snapshot.description),
             "extraction": extraction.result if extraction else None,
             "extraction_status": extraction.status if extraction else "missing",
+            "extraction_version": extraction.version if extraction else None,
+            "processing_status": latest_attempt.status if latest_attempt else "missing",
+            "selection": extraction.diagnostics if extraction else {},
         }
 
     @app.get("/api/v1/monitors/{mid}/{view}", dependencies=[Depends(auth)])
