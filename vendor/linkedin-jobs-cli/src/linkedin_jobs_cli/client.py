@@ -14,7 +14,12 @@ import httpx
 from bs4 import BeautifulSoup
 
 from linkedin_jobs_cli.models import JobPosting, SearchSource
-from linkedin_jobs_cli.parser import enrich_job_from_detail, parse_search_results
+from linkedin_jobs_cli.parser import (
+    CARD_SELECTOR,
+    enrich_job_from_detail,
+    job_description,
+    parse_search_results,
+)
 
 SEARCH_ENDPOINT = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 DETAIL_ENDPOINT = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
@@ -140,8 +145,9 @@ class LinkedInPublicClient:
                 self._last_request_at = time.monotonic()
                 path = urlsplit(str(response.url)).path
                 soup = BeautifulSoup(response.text, "html.parser")
-                has_description = bool(soup.select_one(".show-more-less-html__markup"))
-                has_cards = bool(soup.select_one(".job-search-card"))
+                requested_id = url.rsplit("/", 1)[-1] if "/jobPosting/" in url else None
+                has_description = bool(job_description(soup, requested_id))
+                has_cards = bool(soup.select_one(CARD_SELECTOR))
                 diagnostic = {
                     "status": response.status_code,
                     "path": path[:200],
@@ -286,7 +292,7 @@ class LinkedInPublicClient:
                     source_count += 1
 
                 self.checkpoint(collected)
-                if len(page) < PAGE_SIZE:
+                if len(BeautifulSoup(html, "html.parser").select(CARD_SELECTOR)) < PAGE_SIZE:
                     break
                 offset += PAGE_SIZE
 

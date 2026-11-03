@@ -3,6 +3,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import JobEvidence, { type JobDetail } from "./job-evidence";
 import SkillThemes, { type Skill, type Theme } from "./skill-themes";
+import {
+  Findings,
+  WeekComparison,
+  WeeklyHistory,
+  type Comparison,
+  type Finding,
+  type Week,
+} from "./weekly-trends";
 type Monitor = {
   id: string;
   version: number;
@@ -54,6 +62,8 @@ type Overview = {
   remote: number;
   remote_classifiable: number;
   daily: Day[];
+  comparison: Comparison;
+  findings: Finding[];
 };
 type Job = {
   description_cached: boolean;
@@ -101,7 +111,7 @@ const tabs = [
   "Insights",
   "Preferences & runs",
 ];
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const date = (s: string | null) =>
   s ? new Date(s).toLocaleString("en-GB") : "Not collected";
 const percent = (v: number | null) =>
@@ -127,15 +137,14 @@ export default function Dashboard() {
     [meta, setMeta] = useState<Meta | null>(null),
     [skills, setSkills] = useState<Skill[]>([]);
   const [themes, setThemes] = useState<Theme[]>([]);
+  const [history, setHistory] = useState<Week[]>([]);
   const [titles, setTitles] = useState<Record<string, Record<string, number>>>(
       {},
     ),
     [salaries, setSalaries] = useState<Salaries | null>(null),
     [jobs, setJobs] = useState<Job[]>([]),
     [runs, setRuns] = useState<Run[]>([]);
-  const [insights, setInsights] = useState<
-      { status: string; text: string; job_ids: string[] }[]
-    >([]),
+  const [insights, setInsights] = useState<Finding[]>([]),
     [detail, setDetail] = useState<JobDetail | null>(null);
   const [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
@@ -184,10 +193,15 @@ export default function Dashboard() {
         : m.data[0]?.id;
       if (!id) return;
       if (mid !== id) setMid(id);
-      const end = new Date();
-      const start = new Date(end);
-      start.setDate(start.getDate() - Number(days) + 1);
-      const window = `?from=${start.toLocaleDateString("en-CA", { timeZone: "Europe/London" })}&to=${end.toLocaleDateString("en-CA", { timeZone: "Europe/London" })}`;
+      const timezone = m.data.find(
+        (monitor: Monitor) => monitor.id === id,
+      ).timezone;
+      const end = new Date().toLocaleDateString("en-CA", {
+        timeZone: timezone,
+      });
+      const start = new Date(`${end}T12:00:00Z`);
+      start.setUTCDate(start.getUTCDate() - Number(days) + 1);
+      const window = `?from=${start.toISOString().slice(0, 10)}&to=${end}`;
       const [o, s, t, p, j, r, i] = await Promise.all(
         [
           "overview",
@@ -202,7 +216,13 @@ export default function Dashboard() {
         ),
       );
       if (sequence !== loadSequence.current) return;
+      if (!o.data?.comparison || !Array.isArray(o.data.findings)) {
+        throw new Error(
+          "The API is running an older version. Restart the backend, then retry.",
+        );
+      }
       setOverview(o.data);
+      setHistory(o.history || []);
       setMeta(o.meta);
       setSkills(s.data);
       setThemes(s.themes || []);
@@ -591,6 +611,12 @@ export default function Dashboard() {
                   </p>
                 </div>
                 <section>
+                  <WeekComparison comparison={overview.comparison} />
+                  <h3>Findings from the complete weeks</h3>
+                  <Findings findings={overview.findings} openJob={openJob} />
+                </section>
+                <WeeklyHistory key={mid} weeks={history} />
+                <section>
                   <div className="sectionheading">
                     <div>
                       <h2>Newly observed postings</h2>
@@ -670,14 +696,17 @@ export default function Dashboard() {
               </>
             )}
             {tab === "Skills" && (
-              <section>
-                <h2>Skills with supporting evidence</h2>
-                <p>
-                  Denominator: {meta.parsed} parsed descriptions. Coverage:{" "}
-                  {meta.parsed} / {meta.eligible} observed jobs.
-                </p>
-                {skillTable}
-              </section>
+              <>
+                <WeeklyHistory key={mid} weeks={history} />
+                <section>
+                  <h2>Skills with supporting evidence</h2>
+                  <p>
+                    Denominator: {meta.parsed} parsed descriptions. Coverage:{" "}
+                    {meta.parsed} / {meta.eligible} observed jobs.
+                  </p>
+                  {skillTable}
+                </section>
+              </>
             )}
             {tab === "Titles" &&
               Object.entries(titles).map(([group, values]) => (
@@ -846,25 +875,11 @@ export default function Dashboard() {
             {tab === "Insights" && (
               <section>
                 <h2>Observations and caveats</h2>
-                {insights.map((i, n) => (
-                  <article key={n}>
-                    <span className="tag">{i.status.replaceAll("_", " ")}</span>
-                    <p>{i.text}</p>
-                    {i.job_ids.map((id) => (
-                      <button
-                        className="textbutton"
-                        key={id}
-                        onClick={() => openJob(id)}
-                      >
-                        Job {id}
-                      </button>
-                    ))}
-                  </article>
-                ))}
-                <p>
-                  Period comparisons remain insufficient until comparable
-                  complete windows are available.
-                </p>
+                {overview && (
+                  <WeekComparison comparison={overview.comparison} />
+                )}
+                <h3>Evidence-backed findings</h3>
+                <Findings findings={insights} openJob={openJob} />
               </section>
             )}
             {tab === "Preferences & runs" && (

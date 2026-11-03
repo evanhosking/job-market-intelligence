@@ -14,7 +14,7 @@ CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
 )
 LOGGER = logging.getLogger("market.ai")
 FIELDS = set(
-    "purpose input_sha256 output_token_cap tools_enabled structured_output batch_id run_id job_id snapshot_id extraction_id call_id model mode limit key_configured model_configured endpoint_host prompt_version selector_version taxonomy_version source_chars selected_chars excerpt_count sections reserved cap month duration_ms http_status provider_request_id provider_response_id finish_reason usage validation_status requirement_count compensation_count theme_counts error_type failure_code failure_stage status reason processed selected cached quarantined preview budget_exhausted actual_calls".split()
+    "purpose input_sha256 output_token_cap tools_enabled structured_output batch_id run_id job_id snapshot_id extraction_id call_id model mode limit key_configured model_configured endpoint_host prompt_version selector_version taxonomy_version source_chars selected_chars excerpt_count sections reserved cap month duration_ms http_status provider_request_id provider_response_id finish_reason usage validation_status requirement_count compensation_count discarded_requirements discarded_compensation discarded_classifications theme_counts error_type failure_code failure_stage status reason processed selected cached quarantined preview budget_exhausted actual_calls".split()
 )
 
 

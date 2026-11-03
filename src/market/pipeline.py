@@ -163,7 +163,7 @@ def ingest(db, run, rows, settings, clock=None):
                 ),
             )
         )
-        if existing_observation and not raw.get("descriptionText"):
+        if existing_observation and not clean_description(raw):
             continue
         job = db.scalar(
             select(SourceJob).where(

@@ -17,7 +17,7 @@ from market.models import (
 )
 from market.taxonomy import TAXONOMY_VERSION, THEMES, themed_result
 
-METHOD = "capability-themes-v3"
+METHOD = "complete-weeks-v4"
 
 
 def listing_eligible():
@@ -74,18 +74,18 @@ def observation_payload(db, observation, snapshot):
     )
 
 
-def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
+def _compute_window(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
     rows, first, start, end, tz = cohort(db, qv_id, start, end, mode)
     collected, _, _, _, _ = cohort(db, qv_id, start, end, mode, ("completed", "partial"))
-    collected_parsed = sum(
-        db.scalar(
-            select(Extraction.id)
-            .where(Extraction.snapshot_id == snapshot.id, Extraction.status == "valid")
-            .limit(1)
+    parsed_snapshots = set(
+        db.scalars(
+            select(Extraction.snapshot_id).where(
+                Extraction.snapshot_id.in_([snapshot.id for _, _, snapshot in collected]),
+                Extraction.status == "valid",
+            )
         )
-        is not None
-        for _, _, snapshot in collected
     )
+    collected_parsed = sum(snapshot.id in parsed_snapshots for _, _, snapshot in collected)
     runs = list(
         db.scalars(
             select(Run)
@@ -105,6 +105,7 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
     theme_jobs = defaultdict(set)
     theme_context_jobs = defaultdict(set)
     theme_skills = defaultdict(set)
+    theme_examples: dict[str, list[dict]] = defaultdict(list)
     titles: Counter[str] = Counter()
     seniorities: Counter[str] = Counter()
     arrangements: Counter[str] = Counter()
@@ -112,20 +113,24 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
     extraction_versions: set[str] = set()
     disclosures = set()
     daily: Counter[str] = Counter()
+    snapshot_ids = [snapshot.id for _, _, snapshot in rows]
+    extractions: dict[str, Extraction] = {}
+    for candidate in db.scalars(
+        select(Extraction)
+        .where(Extraction.snapshot_id.in_(snapshot_ids), Extraction.status == "valid")
+        .order_by(
+            case((Extraction.version.like("llm:%"), 0), else_=1),
+            Extraction.created_at.desc(),
+            Extraction.id.desc(),
+        )
+    ):
+        extractions.setdefault(candidate.snapshot_id, candidate)
     for observation, job, snapshot in rows:
         first_date = datetime.fromisoformat(first[job.id]).astimezone(tz).date()
         if start <= first_date <= end:
             daily[first_date.isoformat()] += 1
         titles[snapshot.raw.get("title") or "Unknown"] += 1
-        extraction = db.scalar(
-            select(Extraction)
-            .where(Extraction.snapshot_id == snapshot.id, Extraction.status == "valid")
-            .order_by(
-                case((Extraction.version.like("llm:%"), 0), else_=1),
-                Extraction.created_at.desc(),
-                Extraction.id.desc(),
-            )
-        )
+        extraction = extractions.get(snapshot.id)
         if not extraction or observation_payload(db, observation, snapshot).get("descriptionStale"):
             seniorities["unknown"] += 1
             arrangements["unspecified"] += 1
@@ -161,14 +166,18 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
             theme_context_jobs[(req["theme"], req["context"])].add(job.source_job_id)
             theme_skills[req["theme"]].add(req["canonical_candidate"])
             skills[key].add(job.source_job_id)
+            example = {
+                "job_id": job.source_job_id,
+                "snapshot_id": snapshot.id,
+                "quote": req["evidence_quote"],
+                "alternatives_group": req["alternatives_group"],
+            }
             if len(examples[key]) < 3:
-                examples[key].append(
-                    {
-                        "job_id": job.source_job_id,
-                        "quote": req["evidence_quote"],
-                        "alternatives_group": req["alternatives_group"],
-                    }
-                )
+                examples[key].append(example)
+            if len(theme_examples[req["theme"]]) < 3 and not any(
+                e["job_id"] == job.source_job_id for e in theme_examples[req["theme"]]
+            ):
+                theme_examples[req["theme"]].append(example)
         for pay in data["compensation"]:
             if pay["explicit_in_job_ad"]:
                 disclosures.add(job.id)
@@ -243,7 +252,6 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
             "data_as_of": latest,
             "demo": mode == "offline",
             "small_sample": eligible < 30,
-            "comparison": "insufficient_data",
             "incomplete_runs": sum(r.state != "completed" for r in runs),
             "capped": any(r.diagnostics.get("capped") for r in runs),
             "stale": not latest
@@ -257,6 +265,7 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
             "remote": arrangements["remote"],
             "remote_classifiable": sum(v for k, v in arrangements.items() if k != "unspecified"),
             "daily": days,
+            "job_ids": [job.source_job_id for _, job, _ in rows[:3]],
         },
         "skills": [
             {
@@ -286,6 +295,7 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
                 "stack_count": len(theme_context_jobs[(theme, "current_stack")]),
                 "mentioned_count": len(theme_context_jobs[(theme, "other")]),
                 "skills": sorted(theme_skills[theme]),
+                "examples": theme_examples[theme],
             }
             for theme, ids in sorted(theme_jobs.items(), key=lambda item: (-len(item[1]), item[0]))
         ],
@@ -318,6 +328,188 @@ def compute(db, qv_id, start=None, end=None, mode="offline", requiredness=None):
             }
         ],
     }
+
+
+def _week(db, qv_id, end, mode, requiredness):
+    start = end - timedelta(days=6)
+    result = _compute_window(db, qv_id, start, end, mode, requiredness)
+    meta = result["meta"]
+    missing = [d["date"] for d in result["overview"]["daily"] if d["newly_observed"] is None]
+    return {
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "eligible": meta["eligible"],
+        "parsed": meta["parsed"],
+        "coverage": meta["extraction_coverage"],
+        "complete": not missing,
+        "missing_days": missing,
+        "capped": meta["capped"],
+        "extraction_versions": meta["extraction_versions"],
+        "skills": result["skills"],
+        "themes": result["themes"],
+        "job_ids": result["overview"]["job_ids"],
+    }
+
+
+def _weekly_trends(db, qv_id, start, end, tz, mode, requiredness):
+    # Calendar arithmetic keeps Monday–Sunday windows intact across DST changes.
+    yesterday = datetime.now(tz).date() - timedelta(days=1)
+    last_day = min(end, yesterday)
+    sunday = last_day - timedelta(days=(last_day.weekday() + 1) % 7)
+    count = max(1, (end - start).days // 7 + 1)
+    weeks = [
+        _week(db, qv_id, sunday - timedelta(weeks=i), mode, requiredness)
+        for i in range(max(2, count) - 1, -1, -1)
+    ]
+    previous, current = weeks[-2:]
+    reasons = []
+    if not all(w["complete"] for w in (previous, current)):
+        reasons.append(
+            "Both weeks need a completed daily listing collection on all seven days for this query version."
+        )
+    if any(w["capped"] for w in (previous, current)):
+        reasons.append("A result cap was reached; the collected weeks may not be comparable.")
+    if any(w["eligible"] < 30 for w in (previous, current)):
+        reasons.append("At least 30 distinct observed jobs are needed in each week.")
+    prevalence_reasons = reasons.copy()
+    if any(w["parsed"] < 30 for w in (previous, current)):
+        prevalence_reasons.append(
+            "Skill and theme comparisons need at least 30 parsed descriptions in each week."
+        )
+    versions = set(previous["extraction_versions"] + current["extraction_versions"])
+    if len(versions) != 1:
+        prevalence_reasons.append("Both weeks must use the same single extraction version.")
+    if (
+        previous["coverage"] is not None
+        and current["coverage"] is not None
+        and abs(current["coverage"] - previous["coverage"]) > 0.10 + 1e-9
+    ):
+        prevalence_reasons.append("Extraction coverage differs by more than 10 percentage points.")
+    ready = not reasons
+    prevalence_ready = not prevalence_reasons
+    before, after = previous["eligible"], current["eligible"]
+    changes = []
+    for kind, fields in (
+        ("themes", ("theme",)),
+        ("skills", ("skill", "context", "requiredness", "alternative")),
+    ):
+        prior = {tuple(row[f] for f in fields): row for row in previous[kind]}
+        latest = {tuple(row[f] for f in fields): row for row in current[kind]}
+        for key in sorted(prior.keys() | latest.keys()):
+            old, new = prior.get(key), latest.get(key)
+            old_share = (
+                (old["count"] if old else 0) / previous["parsed"] if previous["parsed"] else None
+            )
+            new_share = (
+                (new["count"] if new else 0) / current["parsed"] if current["parsed"] else None
+            )
+            changes.append(
+                {
+                    "kind": kind,
+                    "label": (latest[key] if key in latest else prior[key])[
+                        "label" if kind == "themes" else "skill"
+                    ],
+                    **{f: key[i] for i, f in enumerate(fields)},
+                    "previous_count": old["count"] if old else 0,
+                    "current_count": new["count"] if new else 0,
+                    "previous_share": old_share,
+                    "current_share": new_share,
+                    "percentage_point_change": (new_share - old_share) * 100
+                    if prevalence_ready and new_share is not None and old_share is not None
+                    else None,
+                    "previous_examples": old["examples"] if old else [],
+                    "current_examples": new["examples"] if new else [],
+                }
+            )
+    comparison = {
+        "status": "ready" if ready else "insufficient_data",
+        "reasons": reasons,
+        "prevalence_status": "ready" if prevalence_ready else "insufficient_data",
+        "prevalence_reasons": prevalence_reasons,
+        "previous": previous,
+        "current": current,
+        "volume": {
+            "change": after - before if ready else None,
+            "relative_change": (after - before) / before if ready and before else None,
+        },
+        "changes": changes,
+    }
+    findings = []
+    period = f"{current['from']}–{current['to']} versus {previous['from']}–{previous['to']}"
+    if ready:
+        findings.append(
+            {
+                "status": "tentative",
+                "text": f"{after} distinct jobs observed versus {before} ({after - before:+d}) in {period}. These are collected sightings, not newly published vacancies or total market demand.",
+                "job_ids": list(dict.fromkeys(current["job_ids"] + previous["job_ids"])),
+                "examples": [],
+            }
+        )
+    if prevalence_ready:
+        for kind, limit in (("themes", 2), ("skills", 1)):
+            ranked = sorted(
+                (
+                    c
+                    for c in changes
+                    if c["kind"] == kind and abs(c["percentage_point_change"]) >= 0.1
+                ),
+                key=lambda c: (-abs(c["percentage_point_change"]), c["label"]),
+            )[:limit]
+            for change in ranked:
+                examples = [
+                    {**e, "period": label}
+                    for label in ("previous", "current")
+                    for e in change[f"{label}_examples"][:1]
+                ]
+                interpretation = "evidenced mentions"
+                if kind == "skills":
+                    interpretation = (
+                        f"{change['context'].replace('_', ' ')} · {change['requiredness']}"
+                    )
+                    if change["alternative"]:
+                        interpretation += " · alternative"
+                findings.append(
+                    {
+                        "status": "tentative",
+                        "text": f"{change['label']} ({interpretation}): {change['current_count']}/{current['parsed']} parsed jobs ({change['current_share']:.0%}) versus {change['previous_count']}/{previous['parsed']} ({change['previous_share']:.0%}), {change['percentage_point_change']:+.1f} percentage points in {period}. Extraction coverage: {current['coverage']:.0%} versus {previous['coverage']:.0%}. This describes the parsed sample; no statistical significance is claimed.",
+                        "job_ids": list(dict.fromkeys(e["job_id"] for e in examples)),
+                        "examples": examples,
+                    }
+                )
+    if prevalence_reasons:
+        findings.append(
+            {
+                "status": "insufficient_data",
+                "text": f"Weekly skill/theme comparison unavailable for {period}. "
+                + " ".join(prevalence_reasons),
+                "job_ids": [],
+                "examples": [],
+            }
+        )
+    return weeks[-count:], comparison, findings
+
+
+def compute(
+    db, qv_id, start=None, end=None, mode="offline", requiredness=None, *, include_history=True
+):
+    result = _compute_window(db, qv_id, start, end, mode, requiredness)
+    if include_history:
+        meta = result["meta"]
+        history, comparison, findings = _weekly_trends(
+            db,
+            qv_id,
+            datetime.fromisoformat(meta["from"]).date(),
+            datetime.fromisoformat(meta["to"]).date(),
+            ZoneInfo(meta["timezone"]),
+            mode,
+            requiredness,
+        )
+        result["history"] = history
+        result["overview"]["comparison"] = comparison
+        result["overview"]["findings"] = findings
+        result["meta"]["comparison"] = comparison["status"]
+        result["insights"] = findings + result["insights"]
+    return result
 
 
 def materialize(db, qv_id):

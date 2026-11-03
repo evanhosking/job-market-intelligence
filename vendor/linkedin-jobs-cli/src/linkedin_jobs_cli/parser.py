@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import urlsplit, urlunsplit
 
@@ -7,8 +8,69 @@ from bs4 import BeautifulSoup, Tag
 
 from linkedin_jobs_cli.models import JobPosting
 
-
 JOB_ID_PATTERN = re.compile(r"(?:jobPosting:|/jobs/view/(?:[^/?]+-)?)(\d+)")
+CARD_SELECTOR = (
+    '.job-search-card, .base-search-card, [data-entity-urn*="jobPosting:"], [data-job-id]'
+)
+DESCRIPTION_SELECTORS = (
+    ".show-more-less-html__markup",
+    ".description__text",
+    "#job-details",
+    '[itemprop="description"]',
+)
+
+
+def html_to_text(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    for tag in soup.select("p, div, li, br, h1, h2, h3, h4, h5, h6, section"):
+        tag.insert_before("\n")
+        tag.insert_after("\n")
+    return "\n".join(
+        line for raw in soup.get_text(" ").splitlines() if (line := " ".join(raw.split()))
+    )
+
+
+def job_description(soup: BeautifulSoup, job_id: str | None = None) -> str:
+    for selector in DESCRIPTION_SELECTORS:
+        for element in soup.select(selector):
+            html = element.decode_contents().strip()
+            if html_to_text(html):
+                return html
+    if job_id is None:
+        return ""
+
+    def postings(value):
+        if isinstance(value, list):
+            for item in value:
+                yield from postings(item)
+        elif isinstance(value, dict):
+            types = value.get("@type", [])
+            if isinstance(types, str):
+                types = [types]
+            if isinstance(types, list) and "JobPosting" in types:
+                yield value
+            yield from postings(value.get("@graph", []))
+
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            data = json.loads(script.get_text())
+        except (ValueError, RecursionError):
+            continue
+        for posting in postings(data):
+            identifier = posting.get("identifier")
+            if isinstance(identifier, dict):
+                identifier = identifier.get("value")
+            candidate = str(identifier) if isinstance(identifier, (str, int)) else ""
+            url = posting.get("url")
+            match = JOB_ID_PATTERN.search(url) if isinstance(url, str) else None
+            if candidate != job_id and (not match or match[1] != job_id):
+                continue
+            html = posting.get("description")
+            if isinstance(html, str) and html_to_text(html):
+                return html
+    return ""
 
 
 def _text(element: Tag | None, separator: str = " ") -> str:
@@ -26,7 +88,10 @@ def _clean_url(url: str | None) -> str | None:
 
 def _job_id(card: Tag) -> str | None:
     urn = card.get("data-entity-urn", "")
-    link = card.select_one("a.base-card__full-link")
+    explicit_id = card.get("data-job-id")
+    if isinstance(explicit_id, str) and explicit_id.isascii() and explicit_id.isdigit():
+        return explicit_id
+    link = card.select_one('a.base-card__full-link, a[href*="/jobs/view/"]')
     candidate = f"{urn} {link.get('href', '') if link else ''}"
     match = JOB_ID_PATTERN.search(candidate)
     return match.group(1) if match else None
@@ -41,11 +106,11 @@ def parse_search_results(html: str, *, source_url: str | None = None) -> list[Jo
     jobs: list[JobPosting] = []
     seen: set[str] = set()
 
-    for card in soup.select(".job-search-card"):
+    for card in soup.select(CARD_SELECTOR):
         job_id = _job_id(card)
-        title = _text(card.select_one(".base-search-card__title"))
+        title = _text(card.select_one(".base-search-card__title, h3, h2"))
         company = _text(card.select_one(".base-search-card__subtitle"))
-        if not job_id or not title or not company or job_id in seen:
+        if not job_id or not title or job_id in seen:
             continue
 
         seen.add(job_id)
@@ -53,7 +118,9 @@ def parse_search_results(html: str, *, source_url: str | None = None) -> list[Jo
         logo = card.select_one("img[data-delayed-url]")
         time = card.select_one("time")
         benefit = _text(card.select_one(".job-posting-benefits__text"))
-        salary_parts = [_text(element) for element in card.select(".job-search-card__salary-info span")]
+        salary_parts = [
+            _text(element) for element in card.select(".job-search-card__salary-info span")
+        ]
         if not salary_parts:
             salary_text = _text(card.select_one(".job-search-card__salary-info"))
             salary_parts = [salary_text] if salary_text else []
@@ -63,7 +130,7 @@ def parse_search_results(html: str, *, source_url: str | None = None) -> list[Jo
                 id=job_id,
                 link=_canonical_job_url(job_id),
                 title=title,
-                company_name=company,
+                company_name=company or "Unknown",
                 company_linkedin_url=_clean_url(company_link.get("href") if company_link else None),
                 company_logo=logo.get("data-delayed-url") if logo else None,
                 location=_text(card.select_one(".job-search-card__location")),
@@ -105,7 +172,7 @@ def enrich_job_from_detail(job: JobPosting, html: str) -> JobPosting:
     logo = soup.select_one(".top-card-layout img[data-delayed-url]")
     posted_time = _text(soup.select_one(".posted-time-ago__text"))
     applicants_caption = _text(soup.select_one(".num-applicants__caption"))
-    description = soup.select_one(".show-more-less-html__markup")
+    description = job_description(soup, job.id)
 
     if title:
         job.title = title
@@ -122,10 +189,8 @@ def enrich_job_from_detail(job: JobPosting, html: str) -> JobPosting:
     if applicants_caption:
         job.applicants_count = _parse_applicants(applicants_caption)
     if description:
-        job.description_html = description.decode_contents().strip()
-        job.description_text = "\n".join(
-            line.strip() for line in description.get_text("\n", strip=True).splitlines() if line.strip()
-        )
+        job.description_html = description
+        job.description_text = html_to_text(description)
 
     criteria: dict[str, str] = {}
     for item in soup.select(".description__job-criteria-item"):
@@ -167,6 +232,6 @@ def enrich_job_from_detail(job: JobPosting, html: str) -> JobPosting:
         if insight and insight not in job.benefits:
             job.benefits.append(insight)
 
-    job.detail_scraped = True
+    job.detail_scraped = bool(job.description_text)
     job.detail_error = None
     return job

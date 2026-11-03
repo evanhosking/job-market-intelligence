@@ -1,6 +1,7 @@
 import hmac
 from datetime import date, datetime, timedelta
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -23,9 +24,16 @@ def create_app(factory=Session, settings=None):
 
     configure_logging(settings)
     app = FastAPI(title="Job Market Intelligence", version="0.1.0")
+    allowed_origins = {settings.web_origin}
+    origin = urlsplit(settings.web_origin)
+    if settings.app_mode == "local" and origin.hostname in {"localhost", "127.0.0.1", "::1"}:
+        port = f":{origin.port}" if origin.port is not None else ""
+        allowed_origins.update(
+            f"{origin.scheme}://{host}{port}" for host in ("localhost", "127.0.0.1", "[::1]")
+        )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.web_origin],
+        allow_origins=sorted(allowed_origins),
         allow_methods=["GET", "POST", "PATCH"],
         allow_headers=["Content-Type", "X-Admin-Key"],
     )
@@ -42,7 +50,7 @@ def create_app(factory=Session, settings=None):
             raise HTTPException(403, "Local mode accepts loopback clients only")
         if request.method in {"POST", "PATCH"} and request.headers.get("origin") not in {
             None,
-            settings.web_origin,
+            *allowed_origins,
         }:
             raise HTTPException(403, "Untrusted origin")
         host = request.headers.get("host", "").split(":")[0]
@@ -290,7 +298,15 @@ def create_app(factory=Session, settings=None):
             raise HTTPException(422, "Invalid window; maximum 366 days")
         if theme is not None and theme not in THEMES:
             raise HTTPException(422, "Unknown skill theme")
-        result = compute(db, qv.id, from_, to, settings.collection_mode, requiredness)
+        result = compute(
+            db,
+            qv.id,
+            from_,
+            to,
+            settings.collection_mode,
+            requiredness,
+            include_history=view in {"overview", "skills", "insights"},
+        )
         data = result[view]
         if view == "salaries" and currency:
             data["groups"] = [g for g in data["groups"] if g["currency"] == currency]
@@ -301,6 +317,19 @@ def create_app(factory=Session, settings=None):
             response["themes"] = [
                 item for item in result["themes"] if not theme or item["theme"] == theme
             ]
+        if "history" in result:
+            response["history"] = result["history"]
+            if view == "skills" and theme:
+                response["history"] = [
+                    {
+                        **week,
+                        **{
+                            kind: [row for row in week[kind] if row["theme"] == theme]
+                            for kind in ("skills", "themes")
+                        },
+                    }
+                    for week in result["history"]
+                ]
         return response
 
     return app

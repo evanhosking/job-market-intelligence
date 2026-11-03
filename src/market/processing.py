@@ -63,10 +63,11 @@ def _process_saved(factory, settings, limit=20, run_id=None, allow_live=False):
         )
     attempted = 0
     for snapshot in snapshots:
+        raw = {**snapshot.raw, "descriptionText": snapshot.description}
         with audit_context(
             snapshot_id=snapshot.id, job_id=str(snapshot.raw.get("id") or "unknown")
         ):
-            text = clean_description(snapshot.raw)
+            text = clean_description(raw)
             excerpts = select_excerpts(text, settings.llm_input_char_cap)
             if not excerpts:
                 event("ai.selection.skipped", reason="no_relevant_excerpts")
@@ -165,7 +166,7 @@ def _process_saved(factory, settings, limit=20, run_id=None, allow_live=False):
             result["selected"] += 1
             try:
                 with audit_context(extraction_id=eid):
-                    parsed, diagnostics = parse_with_llm(snapshot.raw, settings)
+                    parsed, diagnostics = parse_with_llm(raw, settings)
                 with factory.begin() as db:
                     extraction = db.get(Extraction, eid)
                     extraction.status, extraction.result, extraction.diagnostics = (
@@ -291,7 +292,9 @@ def process_rules_saved(factory, settings, limit=20, run_id=None):
                     result["cached"] += 1
                     continue
                 try:
-                    parsed = extract(snapshot.raw, settings)
+                    parsed = extract(
+                        {**snapshot.raw, "descriptionText": snapshot.description}, settings
+                    )
                     extraction = Extraction(
                         snapshot_id=snapshot.id,
                         version=version(settings),

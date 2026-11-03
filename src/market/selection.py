@@ -4,7 +4,9 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-SELECTION_VERSION = "sections-v1"
+from market.taxonomy import find_skills
+
+SELECTION_VERSION = "sections-v2"
 
 
 @dataclass(frozen=True)
@@ -20,7 +22,7 @@ HEADINGS = [
     ("preferred", r"preferred.*|nice to have.*|desirable.*|bonus.*"),
     (
         "requirements",
-        r"required (?:qualifications|skills|experience).*|(?:the )?requirements.*|(?:minimum |essential |required )?qualifications.*|essential|and meet most of the following|your (?:skills|experience).*|the essentials|what you(?:’|\x27)ll (?:bring|need).*|what you will (?:bring|need).*|you will need|about you|what we(?:’|\x27)re looking for|what we are looking for|skills.*|experience and .*",
+        r"required (?:qualifications|skills|experience).*|(?:the )?requirements.*|(?:minimum |essential |required )?qualifications.*|essential|and meet most of the following|your (?:skills|experience|background).*|the essentials|what you(?:’|\x27)ll (?:bring|need|have).*|what you will (?:bring|need).*|what you bring|what you need to succeed|what makes you a great fit|you will need|about you|what we(?:’|\x27)re looking for|what we are looking for|skills.*|experience and .*",
     ),
     (
         "responsibilities",
@@ -34,7 +36,7 @@ HEADINGS = [
     ("pay", r"(?:the |base )?salary.*|compensation.*|pay range.*"),
     (
         "exclude",
-        r"the (?:company|benefits|culture|offices|package)|perks.*|what you should know about how we recruit|useful links.*|about (?:us|the company|jpmorgan.*)|who we are|our (?:company|mission|values|culture).*|benefits.*|what(?:s|’s|\x27s) in it for you.*|what we offer.*|equal opportunit.*|diversity.*|how to apply.*|application process.*|privacy.*|the team",
+        r"the (?:company|benefits|culture|offices|package)|perks.*|what you should know about how we recruit|useful links.*|about (?:us|the company|jpmorgan.*)|who we are|our (?:company|mission|values|culture).*|benefits.*|what(?:s|’s|\x27s) in it for you.*|what we offer.*|equal opportunit.*|diversity.*|how to apply.*|application process.*|privacy.*",
     ),
 ]
 SIGNAL = re.compile(
@@ -102,7 +104,24 @@ def select_excerpts(text, max_chars=8000, max_excerpts=24):
                 if boundary != -1:
                     end = boundary
             chunk = text[position:end]
-            if not INJECTION.search(chunk) and (kind != "other" or SIGNAL.search(chunk)):
+            if INJECTION.search(chunk):
+                for clean_line in re.finditer(r"[^\n]+", chunk):
+                    heading_only = any(
+                        re.fullmatch(pattern, clean_line.group().strip().rstrip(":"), re.I)
+                        for _, pattern in HEADINGS
+                    )
+                    if (
+                        not heading_only
+                        and not INJECTION.search(clean_line.group())
+                        and (
+                            SIGNAL.search(clean_line.group())
+                            or any(find_skills(clean_line.group()))
+                        )
+                    ):
+                        candidates.append(
+                            (kind, position + clean_line.start(), position + clean_line.end())
+                        )
+            elif kind != "other" or SIGNAL.search(chunk) or any(find_skills(chunk)):
                 candidates.append((kind, position, end))
             position = end
     priority = {

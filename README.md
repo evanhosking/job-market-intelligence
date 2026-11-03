@@ -24,6 +24,8 @@ npm run dev
 
 Open http://localhost:3000. The green dashboard shows **Demo workspace**, two synthetic postings, explicit evidence, and a missing salary median for insufficient N. API docs: http://localhost:8000/docs. Do not use the synthetic demo to infer actual hiring.
 
+The web app connects to `http://127.0.0.1:8000` by default, matching the API's IPv4 loopback binding. Local mode accepts `localhost`, `127.0.0.1` and `[::1]` web origins on the configured `WEB_ORIGIN` scheme/port. Restart the API after backend changes; `--reload` can be added to the uvicorn command during development. For a different API address, set `NEXT_PUBLIC_API_URL` in `apps/web/.env.local` and restart/rebuild the web app.
+
 To use the queue instead of file replay, click **Refresh now**, then run in a third terminal:
 
 ```sh
@@ -88,6 +90,7 @@ The tests use temporary SQLite databases and HTTP fakes, never LinkedIn or a pai
 ## Operations and documentation
 
 - [Document review, scope and remaining work](docs/review-and-status.md)
+- [Agentic automation roadmap and milestone tracker](docs/agentic-automation-roadmap.md)
 - [Architecture](docs/architecture.md) and [provider decision](docs/decisions/001-cli-collection.md)
 - [Data and metric definitions](docs/data-definitions.md)
 - [Runbook: scheduling, recovery, security and backups](docs/runbook.md)
@@ -141,6 +144,16 @@ Preview reports only selected character counts, sections and snapshot IDs; it ne
 The monthly model budget is now reserved **per actual attempted request**, atomically before the call, independently of collection budgets. Token usage and selection hashes/offsets are stored, not full model prompts or response bodies. There is no dollar accounting; set an OpenAI project spending limit. In live workers, LLM processing runs after source ingestion commits; the deterministic result remains usable when the model is down. Offline replay never calls OpenAI.
 
 The Jobs detail panel shows categorized facts and expandable short evidence quotes. It requests the original full description only when you expand **Inspect original source description**. Raw JSON and full adverts are not displayed by default.
+
+The CLI parser accepts additional public card/description variants and identity-matched `JobPosting` JSON-LD. Listings with a valid ID/title remain usable when the company is unknown. Pagination counts returned cards rather than deduplicated records, so duplicates do not stop a search early. HTML cleaning preserves paragraph boundaries and inline technical phrases; whitespace-only text falls back to HTML.
+
+The versioned description selector recognizes unheaded technical text and additional requirement headings, and isolates instruction-like lines without discarding neighboring evidence. Model outputs still require strict schema validation. Individual unsupported requirements, pay disclosures and classifications are discarded with warnings and `discarded_*` diagnostics; supported facts remain usable. A response with rejected facts and no remaining supported facts is quarantined, preserving the rules fallback. This makes no repair/retry provider call. Reprocessing validates quotes against each snapshot's saved canonical description, preserving historical provenance.
+
+## Complete-week research
+
+Overview compares the latest finished Monday–Sunday week with its predecessor in the monitor timezone. Overview and Skills show skill/theme history (one finished week in the 7-day view, four in the 28-day view), including weekly parsed denominators and collection gaps. Overview and Insights share deterministic findings with historical evidence excerpts and job links. These calculations use saved data, without collecting jobs or calling a model.
+
+Comparisons need all seven collection days, no capped runs and at least 30 observed jobs per week. Skill/theme differences also need 30 parsed descriptions per week, one matching extraction version and extraction coverage within 10 percentage points. Until then, the app displays counts and explains what is missing. Current-window summaries and finished-week comparisons have separate, explicit date bounds. See [metric definitions](docs/data-definitions.md#complete-week-comparisons-and-history).
 
 ## AI audit logging and capability themes
 
